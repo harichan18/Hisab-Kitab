@@ -1,3 +1,5 @@
+// ignore_for_file: avoid_print
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -5,11 +7,11 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_view/photo_view.dart';
 
@@ -19,6 +21,153 @@ import 'models/transaction_model.dart';
 
 const String _googleServerClientId =
     '614565157950-q0vb676dva84bp5eg102ca1spv6nh0os.apps.googleusercontent.com';
+
+void _receiptLog(String scope, String message) {}
+
+Future<XFile?> _pickReceiptImage({
+  required ImageSource source,
+  required String scope,
+}) async {
+  _receiptLog(scope, 'Opening image picker. source=$source');
+  try {
+    final result = await ImagePicker().pickImage(
+      source: source,
+      imageQuality: 80,
+    );
+    if (result == null) {
+      _receiptLog(scope, 'Image picker returned null.');
+      return null;
+    }
+
+    _receiptLog(scope, 'Image selected: path=${result.path}');
+    return result;
+  } catch (e, st) {
+    _receiptLog(scope, 'Image picker failed: $e\n$st');
+    rethrow;
+  }
+}
+
+Future<XFile?> _compressReceiptImage(File file, {required String scope}) async {
+  _receiptLog(scope, 'Compressing image: path=${file.path}');
+  try {
+    final tempDir = await getTemporaryDirectory();
+    final targetPath =
+        '${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final compressed = await FlutterImageCompress.compressAndGetFile(
+      file.path,
+      targetPath,
+      quality: 75,
+    );
+    _receiptLog(
+      scope,
+      compressed == null
+          ? 'Compression returned null.'
+          : 'Compression complete: path=${compressed.path}',
+    );
+    return compressed;
+  } catch (e, st) {
+    _receiptLog(scope, 'Compression failed: $e\n$st');
+    rethrow;
+  }
+}
+
+Future<String?> _saveReceiptLocally({
+  required File sourceFile,
+  required String firebaseId,
+  required String scope,
+}) async {
+  _receiptLog(scope, 'Saving receipt locally for firebaseId=$firebaseId');
+  try {
+    final directory = await getApplicationSupportDirectory();
+    final receiptsDir = Directory(p.join(directory.path, 'receipts'));
+    if (!await receiptsDir.exists()) {
+      await receiptsDir.create(recursive: true);
+    }
+
+    final destinationPath = p.join(receiptsDir.path, '$firebaseId.jpg');
+    await sourceFile.copy(destinationPath);
+    _receiptLog(scope, 'Receipt saved locally at $destinationPath');
+    return destinationPath;
+  } catch (e, st) {
+    _receiptLog(scope, 'Local receipt save failed: $e\n$st');
+    return null;
+  }
+}
+
+Future<void> _deleteLocalReceipt(String? receiptPath, {required String scope}) async {
+  if (receiptPath == null || receiptPath.isEmpty) {
+    return;
+  }
+
+  try {
+    final file = File(receiptPath);
+    if (await file.exists()) {
+      await file.delete();
+      _receiptLog(scope, 'Deleted local receipt file: $receiptPath');
+    }
+  } catch (e, st) {
+    _receiptLog(scope, 'Local receipt delete failed: $e\n$st');
+  }
+}
+
+String _currentUserDisplayName() {
+  final user = FirebaseAuth.instance.currentUser;
+  final displayName = user?.displayName?.trim() ?? '';
+  if (displayName.isNotEmpty) {
+    return displayName;
+  }
+
+  final email = user?.email?.trim() ?? '';
+  if (email.isNotEmpty) {
+    return email;
+  }
+
+  return user?.uid ?? '';
+}
+
+TransactionModel _normalizeTransactionPerspective(TransactionModel transaction) {
+  return transaction;
+}
+
+String _transactionDisplayFriendName(TransactionModel transaction) {
+  final currentUser = FirebaseAuth.instance.currentUser;
+  if (currentUser == null) {
+    return transaction.friendName;
+  }
+
+  final currentDisplayName = _currentUserDisplayName();
+  if (currentDisplayName.isEmpty) {
+    return transaction.friendName;
+  }
+
+  if (transaction.peerUserId == currentUser.uid &&
+      transaction.friendName.trim().toLowerCase() !=
+          currentDisplayName.trim().toLowerCase()) {
+    return currentDisplayName;
+  }
+
+  return transaction.friendName;
+}
+
+bool _transactionDisplayIsGiven(TransactionModel transaction) {
+  final currentUser = FirebaseAuth.instance.currentUser;
+  if (currentUser == null) {
+    return transaction.iGave;
+  }
+
+  final currentDisplayName = _currentUserDisplayName();
+  if (currentDisplayName.isEmpty) {
+    return transaction.iGave;
+  }
+
+  if (transaction.peerUserId == currentUser.uid &&
+      transaction.friendName.trim().toLowerCase() !=
+          currentDisplayName.trim().toLowerCase()) {
+    return !transaction.iGave;
+  }
+
+  return transaction.iGave;
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -244,8 +393,7 @@ class _LoginPageState extends State<LoginPage> {
       'id=${googleUser.id}, '
       'email=${googleUser.email}, '
       'displayName=${googleUser.displayName}, '
-      'photoUrl=${googleUser.photoUrl}, '
-      'serverAuthCode=${googleUser.serverAuthCode}',
+      'photoUrl=${googleUser.photoUrl}',
     );
   }
 
@@ -993,49 +1141,174 @@ class FirebaseDataService {
   static CollectionReference<Map<String, dynamic>>? get transactionsRef =>
       _userRef?.collection('transactions');
 
-  static Reference? _receiptReference(String firebaseId) {
+  static CollectionReference<Map<String, dynamic>>? _transactionsRefForUid(
+    String? uid,
+  ) {
+    if (uid == null || uid.isEmpty) {
+      return null;
+    }
+    return FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('transactions');
+  }
+
+  static CollectionReference<Map<String, dynamic>>? _deletedRefForUid(
+    String? uid,
+  ) {
+    if (uid == null || uid.isEmpty) {
+      return null;
+    }
+    return FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('deletedTransactions');
+  }
+
+  static Future<String?> resolvePeerUserIdByFriendName(String friendName) async {
     final uid = currentUid;
     if (uid == null) {
       return null;
     }
-    return FirebaseStorage.instance.ref('receipts/$uid/$firebaseId.jpg');
-  }
 
-  static Future<String?> uploadReceipt(
-    File file,
-    String firebaseId,
-    void Function(double) onProgress,
-  ) async {
-    final ref = _receiptReference(firebaseId);
-    if (ref == null) {
+    final normalizedFriendName = friendName.trim().toLowerCase();
+    if (normalizedFriendName.isEmpty) {
       return null;
     }
 
-    final task = ref.putFile(
-      file,
-      SettableMetadata(contentType: 'image/jpeg'),
-    );
+    final friendsCollection = FirebaseFirestore.instance.collection('friends');
+    final user1Docs =
+        await friendsCollection.where('user1', isEqualTo: uid).get();
+    final user2Docs =
+        await friendsCollection.where('user2', isEqualTo: uid).get();
 
-    task.snapshotEvents.listen((snapshot) {
-      if (snapshot.totalBytes > 0) {
-        onProgress(snapshot.bytesTransferred / snapshot.totalBytes);
+    final friendUids = <String>{};
+    for (final doc in [...user1Docs.docs, ...user2Docs.docs]) {
+      final data = doc.data();
+      final user1 = data['user1'] as String? ?? '';
+      final user2 = data['user2'] as String? ?? '';
+      final friendUid = user1 == uid ? user2 : user1;
+      if (friendUid.isNotEmpty && friendUid != uid) {
+        friendUids.add(friendUid);
       }
-    });
+    }
 
-    final snapshot = await task;
-    return await snapshot.ref.getDownloadURL();
+    for (final friendUid in friendUids) {
+      final friendDoc =
+          await FirebaseFirestore.instance.collection('users').doc(friendUid).get();
+      final data = friendDoc.data();
+      if (data == null) {
+        continue;
+      }
+
+      final displayName = (data['name'] as String? ?? '').trim().toLowerCase();
+      if (displayName == normalizedFriendName) {
+        return friendUid;
+      }
+    }
+
+    return null;
   }
 
-  static Future<void> deleteReceipt(String firebaseId) async {
-    final ref = _receiptReference(firebaseId);
-    if (ref == null) {
+  static Future<String?> resolveEffectivePeerUserId(
+    TransactionModel transaction,
+  ) async {
+    final uid = currentUid;
+    if (uid == null) {
+      return transaction.peerUserId ??
+          await resolvePeerUserIdByFriendName(transaction.friendName);
+    }
+
+    if (transaction.peerUserId != null && transaction.peerUserId != uid) {
+      return transaction.peerUserId;
+    }
+
+    return await resolvePeerUserIdByFriendName(transaction.friendName);
+  }
+
+  static Future<void> saveMirroredTransaction(
+    TransactionModel transaction, {
+    required String firebaseId,
+    String? peerUserId,
+  }) async {
+    final uid = currentUid;
+    if (uid == null) {
       return;
     }
-    try {
-      await ref.delete();
-    } catch (_) {
-      // Ignore missing file or permission issues.
+
+    final currentTransactionsRef = _transactionsRefForUid(uid);
+    if (currentTransactionsRef == null) {
+      return;
     }
+
+    final resolvedPeerUid = peerUserId ??
+        await resolvePeerUserIdByFriendName(transaction.friendName);
+    final peerTransactionsRef = _transactionsRefForUid(resolvedPeerUid);
+    final currentDisplayName = _currentUserDisplayName();
+
+    final ownerData = {
+      ...transaction.toFirestoreMap(),
+      'firebaseId': firebaseId,
+      'peerUserId': resolvedPeerUid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    final mirroredData = {
+      ...transaction
+          .copyWith(
+            friendName: currentDisplayName.isNotEmpty
+                ? currentDisplayName
+                : transaction.friendName,
+            iGave: !transaction.iGave,
+            peerUserId: uid,
+          )
+          .toFirestoreMap(),
+      'firebaseId': firebaseId,
+      'peerUserId': uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    final batch = FirebaseFirestore.instance.batch();
+    batch.set(
+      currentTransactionsRef.doc(firebaseId),
+      ownerData,
+      SetOptions(merge: true),
+    );
+
+    if (peerTransactionsRef != null && resolvedPeerUid != null && resolvedPeerUid != uid) {
+      batch.set(
+        peerTransactionsRef.doc(firebaseId),
+        mirroredData,
+        SetOptions(merge: true),
+      );
+    }
+
+    await batch.commit();
+  }
+
+  static Future<void> deleteMirroredTransaction({
+    required String firebaseId,
+    String? peerUserId,
+  }) async {
+    final uid = currentUid;
+    if (uid == null) {
+      return;
+    }
+
+    final currentTransactionsRef = _transactionsRefForUid(uid);
+    if (currentTransactionsRef == null) {
+      return;
+    }
+
+    final batch = FirebaseFirestore.instance.batch();
+    batch.delete(currentTransactionsRef.doc(firebaseId));
+
+    final peerTransactionsRef = _transactionsRefForUid(peerUserId);
+    if (peerTransactionsRef != null && peerUserId != null && peerUserId != uid) {
+      batch.delete(peerTransactionsRef.doc(firebaseId));
+    }
+
+    await batch.commit();
   }
 
   static CollectionReference<Map<String, dynamic>>? get deletedRef =>
@@ -1055,7 +1328,11 @@ class FirebaseDataService {
     return ref.snapshots().map(
       (snapshot) =>
           snapshot.docs
-              .map((doc) => TransactionModel.fromFirestore(doc.id, doc.data()))
+              .map(
+                (doc) => _normalizeTransactionPerspective(
+                  TransactionModel.fromFirestore(doc.id, doc.data()),
+                ),
+              )
               .toList()
             ..sort((a, b) => b.date.compareTo(a.date)),
     );
@@ -1099,48 +1376,50 @@ class FirebaseDataService {
     TransactionModel transaction, {
     String? firebaseId,
   }) async {
+    final scope = 'FirebaseDataService.saveTransaction';
+    _receiptLog(
+      scope,
+      'Saving transaction: firebaseId=$firebaseId data=${transaction.toFirestoreMap()}',
+    );
     final ref = transactionsRef;
     if (ref == null) {
+      _receiptLog(scope, 'transactionsRef is null. Save skipped.');
       return null;
     }
 
-    final data = {
-      ...transaction.toFirestoreMap(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    };
+    final resolvedFirebaseId = firebaseId ?? transaction.firebaseId ?? ref.doc().id;
+    final peerUserId = await resolveEffectivePeerUserId(transaction);
+    _receiptLog(
+      scope,
+      'Writing mirrored transaction id=$resolvedFirebaseId peerUserId=$peerUserId',
+    );
 
-    if (firebaseId == null) {
-      final doc = await ref.add({
-        ...data,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-      await updateSummary();
-      return doc.id;
-    }
+    await saveMirroredTransaction(
+      transaction.copyWith(
+        firebaseId: resolvedFirebaseId,
+        peerUserId: peerUserId,
+      ),
+      firebaseId: resolvedFirebaseId,
+      peerUserId: peerUserId,
+    );
 
-    final docRef = ref.doc(firebaseId);
-    if ((await docRef.get()).exists) {
-      await docRef.set(data, SetOptions(merge: true));
-    } else {
-      await docRef.set({
-        ...data,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    }
+    _receiptLog(scope, 'Updating summary after transaction save.');
     await updateSummary();
-    return firebaseId;
+    _receiptLog(scope, 'Transaction save finished.');
+    return resolvedFirebaseId;
   }
 
   static Future<void> deleteTransaction(TransactionModel transaction) async {
     final firebaseId = transaction.firebaseId;
-    final ref = transactionsRef;
-    if (ref == null || firebaseId == null) {
+    if (firebaseId == null) {
       return;
     }
-    if (transaction.receiptUrl != null) {
-      await deleteReceipt(firebaseId);
-    }
-    await ref.doc(firebaseId).delete();
+    final peerUserId = await resolveEffectivePeerUserId(transaction);
+    await _deleteLocalReceipt(transaction.receiptPath, scope: 'FirebaseDataService.deleteTransaction');
+    await deleteMirroredTransaction(
+      firebaseId: firebaseId,
+      peerUserId: peerUserId,
+    );
     await updateSummary();
   }
 
@@ -1152,9 +1431,16 @@ class FirebaseDataService {
       return;
     }
 
-    final deletedEntry = DeletedEntryModel(
+    final uid = currentUid;
+    final peerUserId = await resolveEffectivePeerUserId(transaction);
+    final peerTxRef = _transactionsRefForUid(peerUserId);
+    final peerDeletedRef = _deletedRefForUid(peerUserId);
+    final currentDisplayName = _currentUserDisplayName();
+
+    final ownerDeletedEntry = DeletedEntryModel(
       originalEntryId: transaction.id ?? 0,
       originalFirebaseId: firebaseId,
+      peerUserId: peerUserId,
       personId: DatabaseHelper.personIdForName(transaction.friendName),
       friendName: transaction.friendName,
       date: transaction.date,
@@ -1163,14 +1449,43 @@ class FirebaseDataService {
       isGiven: transaction.iGave,
       clearedDate: _formatDate(DateTime.now()),
       receiptUrl: transaction.receiptUrl,
+      receiptPath: transaction.receiptPath,
+    );
+
+    final mirroredDeletedEntry = DeletedEntryModel(
+      originalEntryId: transaction.id ?? 0,
+      originalFirebaseId: firebaseId,
+      peerUserId: uid,
+      personId: DatabaseHelper.personIdForName(
+        currentDisplayName.isNotEmpty ? currentDisplayName : transaction.friendName,
+      ),
+      friendName: currentDisplayName.isNotEmpty
+          ? currentDisplayName
+          : transaction.friendName,
+      date: transaction.date,
+      note: transaction.note,
+      amount: transaction.amount,
+      isGiven: !transaction.iGave,
+      clearedDate: _formatDate(DateTime.now()),
+      receiptUrl: transaction.receiptUrl,
+      receiptPath: transaction.receiptPath,
     );
 
     final batch = FirebaseFirestore.instance.batch();
-    batch.set(deleted.doc(), {
-      ...deletedEntry.toFirestoreMap(),
+    batch.set(deleted.doc(firebaseId), {
+      ...ownerDeletedEntry.toFirestoreMap(),
       'createdAt': FieldValue.serverTimestamp(),
     });
+    if (peerDeletedRef != null && peerUserId != null && peerUserId != uid) {
+      batch.set(peerDeletedRef.doc(firebaseId), {
+        ...mirroredDeletedEntry.toFirestoreMap(),
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
     batch.delete(txRef.doc(firebaseId));
+    if (peerTxRef != null && peerUserId != null && peerUserId != uid) {
+      batch.delete(peerTxRef.doc(firebaseId));
+    }
     await batch.commit();
     await updateSummary();
   }
@@ -1183,36 +1498,67 @@ class FirebaseDataService {
       return;
     }
 
+    final uid = currentUid;
+    final peerUserId = entry.peerUserId == uid
+        ? await resolvePeerUserIdByFriendName(entry.friendName)
+        : entry.peerUserId ?? await resolvePeerUserIdByFriendName(entry.friendName);
+    final peerTxRef = _transactionsRefForUid(peerUserId);
+    final peerDeletedRef = _deletedRefForUid(peerUserId);
+    final restoredFirebaseId = entry.originalFirebaseId ?? txRef.doc().id;
+    final currentDisplayName = _currentUserDisplayName();
+
     final transaction = TransactionModel(
+      peerUserId: entry.peerUserId,
       friendName: entry.friendName,
       amount: entry.amount,
       note: entry.note,
       date: entry.date,
       iGave: entry.isGiven,
       receiptUrl: entry.receiptUrl,
+      receiptPath: entry.receiptPath,
     );
 
     final batch = FirebaseFirestore.instance.batch();
-    batch.set(txRef.doc(), {
+    batch.set(txRef.doc(restoredFirebaseId), {
       ...transaction.toFirestoreMap(),
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
+    if (peerTxRef != null && peerUserId != null && peerUserId != uid) {
+      batch.set(peerTxRef.doc(restoredFirebaseId), {
+        ...transaction
+            .copyWith(
+              friendName: currentDisplayName.isNotEmpty
+                  ? currentDisplayName
+                  : transaction.friendName,
+              iGave: !transaction.iGave,
+              peerUserId: uid,
+            )
+            .toFirestoreMap(),
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
     batch.delete(deleted.doc(deletedId));
+    if (peerDeletedRef != null && peerUserId != null && peerUserId != uid) {
+      batch.delete(peerDeletedRef.doc(entry.originalFirebaseId ?? deletedId));
+    }
     await batch.commit();
     await updateSummary();
   }
 
   static Future<void> permanentlyDeleteEntry(DeletedEntryModel entry) async {
-    if (entry.originalFirebaseId != null) {
-      await deleteReceipt(entry.originalFirebaseId!);
-    }
     final deletedId = entry.firebaseId;
     final deleted = deletedRef;
     if (deleted == null || deletedId == null) {
       return;
     }
+    final peerDeletedRef = _deletedRefForUid(entry.peerUserId);
+    await _deleteLocalReceipt(entry.receiptPath, scope: 'FirebaseDataService.permanentlyDeleteEntry');
     await deleted.doc(deletedId).delete();
+    if (peerDeletedRef != null && entry.peerUserId != null && entry.peerUserId != currentUid) {
+      await peerDeletedRef.doc(entry.originalFirebaseId ?? deletedId).delete();
+    }
   }
 
   static Future<void> saveBankBalance(double amount) async {
@@ -1386,7 +1732,7 @@ class FirebaseDataService {
 
     debugPrint(
       '[Migration] Imported ${localTransactions.length} transactions, '
-      '${localDeletedEntries.length} deleted transactions, '
+      '${localDeletedEntries.length} cleared transactions, '
       'bank balance $localBankBalance for $uid.',
     );
   }
@@ -1397,6 +1743,91 @@ class FirebaseDataService {
 
   static String _formatDate(DateTime date) {
     return "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
+  }
+}
+
+class ReceiptAttachmentSection extends StatelessWidget {
+  const ReceiptAttachmentSection({
+    super.key,
+    required this.receiptImage,
+    required this.receiptUploadProgress,
+    required this.onPick,
+    required this.onClear,
+  });
+
+  final XFile? receiptImage;
+  final double receiptUploadProgress;
+  final void Function(ImageSource source) onPick;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Receipt (optional)",
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => onPick(ImageSource.camera),
+                icon: const Icon(Icons.camera_alt),
+                label: const Text("Camera"),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => onPick(ImageSource.gallery),
+                icon: const Icon(Icons.photo_library),
+                label: const Text("Gallery"),
+              ),
+            ),
+          ],
+        ),
+        if (receiptImage != null) ...[
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 140,
+            child: Stack(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.file(
+                    File(receiptImage!.path),
+                    fit: BoxFit.cover,
+                    width: double.infinity,
+                  ),
+                ),
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: GestureDetector(
+                    onTap: onClear,
+                    child: Container(
+                      decoration: const BoxDecoration(
+                        color: Colors.black54,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.close, color: Colors.white),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        if (receiptUploadProgress > 0 && receiptUploadProgress < 1)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: LinearProgressIndicator(value: receiptUploadProgress),
+          ),
+      ],
+    );
   }
 }
 
@@ -1733,7 +2164,7 @@ class _HomePageState extends State<HomePage> {
     final Map<String, List<TransactionModel>> map = {};
     final Map<String, String> originalNames = {};
     for (var t in transactions) {
-      final name = t.friendName.trim();
+      final name = _transactionDisplayFriendName(t).trim();
       if (name.isEmpty) continue;
       final key = name.toLowerCase();
       if (!originalNames.containsKey(key)) {
@@ -1798,14 +2229,18 @@ class _HomePageState extends State<HomePage> {
   List<TransactionModel> transactionsForFriend(String friendName) {
     final normalizedName = friendName.trim().toLowerCase();
     return transactions
-        .where((t) => t.friendName.trim().toLowerCase() == normalizedName)
+        .where(
+          (t) =>
+              _transactionDisplayFriendName(t).trim().toLowerCase() ==
+              normalizedName,
+        )
         .toList();
   }
 
   double totalGivenForFriend(String friendName) {
     double total = 0;
     for (final t in transactionsForFriend(friendName)) {
-      if (t.iGave) {
+      if (_transactionDisplayIsGiven(t)) {
         total += t.amount;
       }
     }
@@ -1815,7 +2250,7 @@ class _HomePageState extends State<HomePage> {
   double totalTakenForFriend(String friendName) {
     double total = 0;
     for (final t in transactionsForFriend(friendName)) {
-      if (!t.iGave) {
+      if (!_transactionDisplayIsGiven(t)) {
         total += t.amount;
       }
     }
@@ -1882,119 +2317,253 @@ class _HomePageState extends State<HomePage> {
     );
 
     final formKey = GlobalKey<FormState>();
+    XFile? receiptImage;
+    double receiptUploadProgress = 0;
+    bool isSaving = false;
+    late StateSetter setDialogState;
 
     final saved = await showDialog<bool>(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          title: Text(
-            isPlus
-                ? "Give Money to $friendName"
-                : "Take Money from $friendName",
-            style: TextStyle(
-              color: isPlus ? Colors.green : Colors.red,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          content: Form(
-            key: formKey,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextFormField(
-                    controller: amountController,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Money (Amount)",
-                      prefixText: "\u20B9",
-                    ),
-                    validator: (val) {
-                      if (val == null || val.isEmpty) {
-                        return "Please enter amount";
-                      }
-                      if (double.tryParse(val) == null) {
-                        return "Please enter a valid number";
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    controller: noteController,
-                    decoration: const InputDecoration(labelText: "Note"),
-                    validator: (val) {
-                      if (val == null || val.isEmpty) {
-                        return "Please enter a note";
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
+        Future<void> handlePick(ImageSource source) async {
+          const scope = 'Home.quickAddTransaction.pickReceipt';
+          final picked = await _pickReceiptImage(source: source, scope: scope);
+          if (picked == null) {
+            return;
+          }
+          if (!dialogContext.mounted) {
+            return;
+          }
+          _receiptLog(scope, 'Applying picked image to quick-add dialog.');
+          receiptImage = picked;
+          receiptUploadProgress = 0;
+          setDialogState(() {});
+        }
+
+        Future<void> handleSave() async {
+          const scope = 'Home.quickAddTransaction.save';
+          _receiptLog(scope, 'Save pressed. receiptSelected=${receiptImage != null}');
+          if (!(formKey.currentState?.validate() ?? false)) {
+            _receiptLog(scope, 'Form validation failed.');
+            return;
+          }
+
+          try {
+            isSaving = true;
+            if (dialogContext.mounted) {
+              setDialogState(() {});
+            }
+
+            final currentUser = FirebaseAuth.instance.currentUser;
+            _receiptLog(
+              scope,
+              'Current user=${currentUser?.uid ?? 'null'} existingReceipt=${receiptImage != null}',
+            );
+
+            String? firebaseId;
+            String? receiptPath;
+
+            if (receiptImage != null) {
+              if (currentUser == null) {
+                _receiptLog(
+                  scope,
+                  'No signed-in user; local receipt save skipped and transaction will still be saved.',
+                );
+              } else {
+                firebaseId = FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(currentUser.uid)
+                    .collection('transactions')
+                    .doc()
+                    .id;
+                _receiptLog(scope, 'Generated firebaseId=$firebaseId for local receipt save.');
+
+                final compressedImage = await _compressReceiptImage(
+                  File(receiptImage!.path),
+                  scope: scope,
+                );
+                if (compressedImage != null) {
+                  final compressedFile = File(compressedImage.path);
+                  receiptPath = await _saveReceiptLocally(
+                    sourceFile: compressedFile,
+                    firebaseId: firebaseId,
+                    scope: scope,
+                  );
+                } else {
+                  _receiptLog(
+                    scope,
+                    'Compression returned null; continuing without local receipt path.',
+                  );
+                }
+              }
+            }
+
+            final transaction = TransactionModel(
+              friendName: friendName,
+              amount: double.parse(amountController.text.trim()),
+              note: noteController.text.trim(),
+              date: dateController.text.trim(),
+              iGave: isPlus,
+              firebaseId: firebaseId,
+              receiptPath: receiptPath,
+            );
+
+            _receiptLog(
+              scope,
+              'Built transaction payload: ${transaction.toFirestoreMap()}',
+            );
+
+            _receiptLog(scope, 'Writing new transaction to local DB.');
+            await DatabaseHelper.instance.insertTransaction(transaction);
+            _receiptLog(scope, 'Writing new transaction to Firestore.');
+            await FirebaseDataService.saveTransaction(
+              transaction,
+              firebaseId: firebaseId,
+            );
+
+            _receiptLog(scope, 'Save finished successfully.');
+            if (dialogContext.mounted) {
+              Navigator.pop(dialogContext, true);
+            }
+          } catch (e, st) {
+            _receiptLog(scope, 'Save failed: $e\n$st');
+            if (dialogContext.mounted) {
+              ScaffoldMessenger.of(dialogContext).showSnackBar(
+                SnackBar(content: Text('Failed to save transaction: $e')),
+              );
+            }
+          } finally {
+            isSaving = false;
+            if (dialogContext.mounted) {
+              setDialogState(() {});
+            }
+          }
+        }
+
+        return StatefulBuilder(
+          builder: (context, stateSetter) {
+            setDialogState = stateSetter;
+            return AlertDialog(
+              title: Text(
+                isPlus
+                    ? "Give Money to $friendName"
+                    : "Take Money from $friendName",
+                style: TextStyle(
+                  color: isPlus ? Colors.green : Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              content: Form(
+                key: formKey,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Expanded(
-                        child: TextFormField(
-                          controller: dateController,
-                          decoration: const InputDecoration(labelText: "Date"),
-                          validator: (val) {
-                            if (val == null || val.isEmpty) {
-                              return "Please enter date";
-                            }
-                            return null;
-                          },
+                      TextFormField(
+                        controller: amountController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: "Money (Amount)",
+                          prefixText: "\u20B9",
                         ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.calendar_month),
-                        onPressed: () async {
-                          final selected = await showDatePicker(
-                            context: dialogContext,
-                            initialDate: DateTime.now(),
-                            firstDate: DateTime(2000),
-                            lastDate: DateTime(2100),
-                          );
-                          if (selected != null) {
-                            dateController.text =
-                                "${selected.year}-${selected.month.toString().padLeft(2, '0')}-${selected.day.toString().padLeft(2, '0')}";
+                        validator: (val) {
+                          if (val == null || val.isEmpty) {
+                            return "Please enter amount";
                           }
+                          if (double.tryParse(val) == null) {
+                            return "Please enter a valid number";
+                          }
+                          return null;
                         },
                       ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: noteController,
+                        decoration: const InputDecoration(labelText: "Note"),
+                        validator: (val) {
+                          if (val == null || val.isEmpty) {
+                            return "Please enter a note";
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: dateController,
+                              decoration:
+                                  const InputDecoration(labelText: "Date"),
+                              validator: (val) {
+                                if (val == null || val.isEmpty) {
+                                  return "Please enter date";
+                                }
+                                return null;
+                              },
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.calendar_month),
+                            onPressed: () async {
+                              final selected = await showDatePicker(
+                                context: dialogContext,
+                                initialDate: DateTime.now(),
+                                firstDate: DateTime(2000),
+                                lastDate: DateTime(2100),
+                              );
+                              if (selected != null) {
+                                dateController.text =
+                                    "${selected.year}-${selected.month.toString().padLeft(2, '0')}-${selected.day.toString().padLeft(2, '0')}";
+                                setDialogState(() {});
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      ReceiptAttachmentSection(
+                        receiptImage: receiptImage,
+                        receiptUploadProgress: receiptUploadProgress,
+                        onPick: (source) async {
+                          await handlePick(source);
+                        },
+                        onClear: () {
+                          _receiptLog(
+                            'Home.quickAddTransaction.clearReceipt',
+                            'Clearing selected receipt image.',
+                          );
+                          receiptImage = null;
+                          receiptUploadProgress = 0;
+                          setDialogState(() {});
+                        },
+                      ),
+                      if (isSaving) ...[
+                        const SizedBox(height: 12),
+                        const LinearProgressIndicator(),
+                      ],
                     ],
                   ),
-                ],
+                ),
               ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text("Cancel"),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                if (formKey.currentState?.validate() ?? false) {
-                  final transaction = TransactionModel(
-                    friendName: friendName,
-                    amount: double.parse(amountController.text),
-                    note: noteController.text,
-                    date: dateController.text,
-                    iGave: isPlus,
-                  );
-                  await DatabaseHelper.instance.insertTransaction(transaction);
-                  await FirebaseDataService.saveTransaction(transaction);
-                  if (dialogContext.mounted) {
-                    Navigator.pop(dialogContext, true);
-                  }
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isPlus ? Colors.green : Colors.red,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text("Save"),
-            ),
-          ],
+              actions: [
+                TextButton(
+                  onPressed: isSaving
+                      ? null
+                      : () => Navigator.pop(dialogContext, false),
+                  child: const Text("Cancel"),
+                ),
+                ElevatedButton(
+                  onPressed: isSaving ? null : handleSave,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isPlus ? Colors.green : Colors.red,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text("Save"),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -2428,101 +2997,98 @@ class _AddPageState extends State<AddPage> {
     }
   }
 
-  Future<XFile?> _compressImage(File file) async {
-    final tempDir = await getTemporaryDirectory();
-    final targetPath = '${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}.jpg';
-    return await FlutterImageCompress.compressAndGetFile(
-      file.path,
-      targetPath,
-      quality: 75,
-    );
-  }
-
-  Future<void> _pickReceipt(ImageSource source) async {
-    final result = await ImagePicker().pickImage(
-      source: source,
-      imageQuality: 80,
-    );
-    if (result == null) {
-      return;
-    }
-
-    setState(() {
-      receiptImage = result;
-    });
-  }
-
   Future<void> saveTransaction() async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    String? firebaseId = widget.transaction?.firebaseId;
-    String? receiptUrl = widget.transaction?.receiptUrl;
+    const scope = 'AddPage.saveTransaction';
+    _receiptLog(scope, 'Save pressed. receiptSelected=${receiptImage != null}');
+    try {
+      final currentUser = FirebaseAuth.instance.currentUser;
+      _receiptLog(
+        scope,
+        'Current user=${currentUser?.uid ?? 'null'} existingFirebaseId=${widget.transaction?.firebaseId}',
+      );
 
-    if (receiptImage != null) {
-      if (currentUser == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Sign in to attach a receipt.')),
+      String? firebaseId = widget.transaction?.firebaseId;
+      String? receiptPath = widget.transaction?.receiptPath;
+
+      if (receiptImage != null) {
+        if (currentUser == null) {
+          _receiptLog(
+            scope,
+            'No signed-in user; local receipt save will be skipped and transaction will still be saved.',
           );
+        } else {
+          firebaseId ??= FirebaseFirestore.instance
+              .collection('users')
+              .doc(currentUser.uid)
+              .collection('transactions')
+              .doc()
+              .id;
+          _receiptLog(scope, 'Using firebaseId=$firebaseId for local receipt save.');
+
+          final compressedImage =
+              await _compressReceiptImage(File(receiptImage!.path), scope: scope);
+          if (compressedImage != null) {
+            final compressed = File(compressedImage.path);
+            receiptPath = await _saveReceiptLocally(
+              sourceFile: compressed,
+              firebaseId: firebaseId,
+              scope: scope,
+            );
+          } else {
+            _receiptLog(
+              scope,
+              'Compression returned null; continuing without local receipt path.',
+            );
+          }
         }
-        return;
       }
 
-      firebaseId ??= FirebaseFirestore.instance
-          .collection('users')
-          .doc(currentUser.uid)
-          .collection('transactions')
-          .doc()
-          .id;
+      final transaction = TransactionModel(
+        id: widget.transaction?.id,
+        firebaseId: widget.transaction?.firebaseId ?? firebaseId,
+        peerUserId: widget.transaction?.peerUserId,
+        receiptUrl: widget.transaction?.receiptUrl,
+        receiptPath: receiptPath,
+        friendName: friendController.text.trim(),
+        amount: double.parse(amountController.text),
+        note: noteController.text.trim(),
+        date: dateController.text.trim(),
+        iGave: iGave,
+      );
 
-      final compressedImage = await _compressImage(File(receiptImage!.path));
-      if (compressedImage != null) {
-        final compressed = File(compressedImage.path);
-        setState(() {
-          receiptUploadProgress = 0;
-        });
-        receiptUrl = await FirebaseDataService.uploadReceipt(
-          compressed,
-          firebaseId,
-          (progress) {
-            if (mounted) {
-              setState(() {
-                receiptUploadProgress = progress;
-              });
-            }
-          },
+      _receiptLog(scope, 'Built transaction payload: ${transaction.toFirestoreMap()}');
+
+      if (widget.transaction == null) {
+        _receiptLog(scope, 'Writing new transaction to local DB.');
+        await DatabaseHelper.instance.insertTransaction(transaction);
+        _receiptLog(scope, 'Writing new transaction to Firestore.');
+        await FirebaseDataService.saveTransaction(
+          transaction,
+          firebaseId: firebaseId,
+        );
+      } else {
+        if (transaction.id != null) {
+          _receiptLog(scope, 'Updating transaction in local DB.');
+          await DatabaseHelper.instance.updateTransaction(transaction);
+        }
+        _receiptLog(scope, 'Writing updated transaction to Firestore.');
+        await FirebaseDataService.saveTransaction(
+          transaction,
+          firebaseId: transaction.firebaseId,
         );
       }
-    }
 
-    final transaction = TransactionModel(
-      id: widget.transaction?.id,
-      firebaseId: widget.transaction?.firebaseId ?? firebaseId,
-      receiptUrl: receiptUrl,
-      friendName: friendController.text,
-      amount: double.parse(amountController.text),
-      note: noteController.text,
-      date: dateController.text,
-      iGave: iGave,
-    );
-
-    if (widget.transaction == null) {
-      await DatabaseHelper.instance.insertTransaction(transaction);
-      await FirebaseDataService.saveTransaction(
-        transaction,
-        firebaseId: firebaseId,
-      );
-    } else {
-      if (transaction.id != null) {
-        await DatabaseHelper.instance.updateTransaction(transaction);
+      _receiptLog(scope, 'Save finished successfully.');
+      if (mounted) {
+        Navigator.pop(context, true);
       }
-      await FirebaseDataService.saveTransaction(
-        transaction,
-        firebaseId: transaction.firebaseId,
-      );
-    }
-
-    if (mounted) {
-      Navigator.pop(context, true);
+    } catch (e, st) {
+      _receiptLog(scope, 'Save failed: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save transaction: $e')),
+        );
+      }
     }
   }
 
@@ -2574,73 +3140,30 @@ class _AddPageState extends State<AddPage> {
                 ),
               ),
               const SizedBox(height: 16),
-              if (FirebaseAuth.instance.currentUser != null) ...[
-                const Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    "Receipt (optional)",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => _pickReceipt(ImageSource.camera),
-                        icon: const Icon(Icons.camera_alt),
-                        label: const Text("Camera"),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => _pickReceipt(ImageSource.gallery),
-                        icon: const Icon(Icons.photo_library),
-                        label: const Text("Gallery"),
-                      ),
-                    ),
-                  ],
-                ),
-                if (receiptImage != null) ...[
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    height: 140,
-                    child: Stack(
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(
-                            File(receiptImage!.path),
-                            fit: BoxFit.cover,
-                            width: double.infinity,
-                          ),
-                        ),
-                        Positioned(
-                          top: 8,
-                          right: 8,
-                          child: GestureDetector(
-                            onTap: () => setState(() => receiptImage = null),
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: Colors.black54,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(Icons.close, color: Colors.white),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-                if (receiptUploadProgress > 0 && receiptUploadProgress < 1)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: LinearProgressIndicator(value: receiptUploadProgress),
-                  ),
-                const SizedBox(height: 16),
-              ],
+              ReceiptAttachmentSection(
+                receiptImage: receiptImage,
+                receiptUploadProgress: receiptUploadProgress,
+                onPick: (source) async {
+                  final result = await _pickReceiptImage(
+                    source: source,
+                    scope: 'AddPage.pickReceipt',
+                  );
+                  if (result == null || !mounted) {
+                    return;
+                  }
+                  setState(() {
+                    receiptImage = result;
+                  });
+                },
+                onClear: () {
+                  _receiptLog('AddPage.pickReceipt', 'Receipt cleared.');
+                  setState(() {
+                    receiptImage = null;
+                    receiptUploadProgress = 0;
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
               SwitchListTile(
                 title: Text(iGave ? "I Gave Money" : "I Took Money"),
                 value: iGave,
@@ -2665,6 +3188,199 @@ class _AddPageState extends State<AddPage> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class TransactionDetailPage extends StatelessWidget {
+  const TransactionDetailPage({super.key, required this.transaction});
+
+  final TransactionModel transaction;
+
+  Widget? _buildReceiptWidget(BuildContext context) {
+    final receiptPath = transaction.receiptPath;
+    final receiptUrl = transaction.receiptUrl;
+
+    if (receiptPath != null && receiptPath.isNotEmpty) {
+      final file = File(receiptPath);
+      if (file.existsSync()) {
+        return GestureDetector(
+          onTap: () {
+            showDialog(
+              context: context,
+              builder: (_) {
+                return Dialog(
+                  insetPadding: const EdgeInsets.all(16),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: PhotoView(
+                      imageProvider: FileImage(file),
+                      backgroundDecoration:
+                          const BoxDecoration(color: Colors.black),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: Image.file(
+              file,
+              fit: BoxFit.cover,
+              width: double.infinity,
+            ),
+          ),
+        );
+      }
+    }
+
+    if (receiptUrl != null && receiptUrl.isNotEmpty) {
+      return GestureDetector(
+        onTap: () {
+          showDialog(
+            context: context,
+            builder: (_) {
+              return Dialog(
+                insetPadding: const EdgeInsets.all(16),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: PhotoView(
+                    imageProvider: NetworkImage(receiptUrl),
+                    backgroundDecoration:
+                        const BoxDecoration(color: Colors.black),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Image.network(
+            receiptUrl,
+            fit: BoxFit.cover,
+            width: double.infinity,
+            errorBuilder: (_, _, _) => const SizedBox(
+              height: 180,
+              child: Center(
+                child: Icon(Icons.broken_image, size: 48, color: Colors.grey),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return null;
+  }
+
+  Widget _detailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isGiven = _transactionDisplayIsGiven(transaction);
+    final amountColor = isGiven ? Colors.green : Colors.red;
+    final receiptWidget = _buildReceiptWidget(context);
+    final statusText = isGiven ? 'To Get' : 'To Give';
+    final displayFriendName = _transactionDisplayFriendName(transaction);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Transaction Details'), centerTitle: true),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Card(
+              color: Colors.grey[900],
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      displayFriendName,
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text('Status: $statusText', style: TextStyle(color: amountColor)),
+                    const SizedBox(height: 16),
+                    Text(
+                      '\u20B9${transaction.amount.toStringAsFixed(0)}',
+                      style: TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        color: amountColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (receiptWidget != null) ...[
+              const SizedBox(height: 16),
+              receiptWidget,
+              const SizedBox(height: 16),
+            ],
+            Card(
+              color: Colors.grey[900],
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Transaction Info',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _detailRow('Date', transaction.date),
+                    _detailRow('Note', transaction.note),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -2710,15 +3426,15 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
         if (!mounted) {
           return;
         }
-        setState(() {
-          personTransactions = all
+          setState(() {
+            personTransactions = all
               .where(
                 (t) =>
-                    t.friendName.trim().toLowerCase() ==
+                    _transactionDisplayFriendName(t).trim().toLowerCase() ==
                     widget.friendName.trim().toLowerCase(),
               )
               .toList();
-          isLoading = false;
+            isLoading = false;
         });
       },
     );
@@ -2748,11 +3464,11 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
     if (!mounted) {
       return;
     }
-    setState(() {
-      personTransactions = all
+      setState(() {
+        personTransactions = all
           .where(
             (t) =>
-                t.friendName.trim().toLowerCase() ==
+                _transactionDisplayFriendName(t).trim().toLowerCase() ==
                 widget.friendName.trim().toLowerCase(),
           )
           .toList()
@@ -2766,7 +3482,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   double get totalGiven {
     double total = 0;
     for (var t in personTransactions) {
-      if (t.iGave) {
+      if (_transactionDisplayIsGiven(t)) {
         total += t.amount;
       }
     }
@@ -2776,7 +3492,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   double get totalTaken {
     double total = 0;
     for (var t in personTransactions) {
-      if (!t.iGave) {
+      if (!_transactionDisplayIsGiven(t)) {
         total += t.amount;
       }
     }
@@ -2846,24 +3562,6 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                 },
               ),
             ],
-          ),
-        );
-      },
-    );
-  }
-
-  void _showReceiptViewer(BuildContext context, String url) {
-    showDialog(
-      context: context,
-      builder: (_) {
-        return Dialog(
-          insetPadding: const EdgeInsets.all(16),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: PhotoView(
-              imageProvider: NetworkImage(url),
-              backgroundDecoration: const BoxDecoration(color: Colors.black),
-            ),
           ),
         );
       },
@@ -2975,33 +3673,59 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
             ),
           ],
           rows: personTransactions.map((t) {
-            final rowBgColor = t.iGave
+            final isGiven = _transactionDisplayIsGiven(t);
+            final rowBgColor = isGiven
                 ? Colors.green.withValues(alpha: 0.15)
                 : Colors.red.withValues(alpha: 0.15);
-            final moneyColor = t.iGave ? Colors.green : Colors.red;
+            final moneyColor = isGiven ? Colors.green : Colors.red;
+
+            Widget buildCell(
+              Widget child, {
+              Alignment alignment = Alignment.centerLeft,
+            }) {
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => TransactionDetailPage(transaction: t),
+                    ),
+                  );
+                },
+                onLongPress: () => _showTransactionOptions(context, t),
+                child: Container(
+                  alignment: alignment,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: child,
+                ),
+              );
+            }
 
             return DataRow(
               color: WidgetStateProperty.all(rowBgColor),
               cells: [
-                DataCell(Text(t.date)),
-                DataCell(Text(t.note)),
+                DataCell(buildCell(Text(t.date))),
+                DataCell(buildCell(Text(t.note))),
                 DataCell(
-                  Text(
-                    "\u20B9${t.amount.toStringAsFixed(0)}",
-                    style: TextStyle(
-                      color: moneyColor,
-                      fontWeight: FontWeight.bold,
+                  buildCell(
+                    Text(
+                      "\u20B9${t.amount.toStringAsFixed(0)}",
+                      style: TextStyle(
+                        color: moneyColor,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
+                    alignment: Alignment.centerRight,
                   ),
                 ),
                 DataCell(
-                  t.receiptUrl != null
-                      ? GestureDetector(
-                          onTap: () => _showReceiptViewer(context, t.receiptUrl!),
-                          child: ClipRRect(
+                  buildCell(
+                    (t.receiptPath != null && t.receiptPath!.isNotEmpty)
+                        ? ClipRRect(
                             borderRadius: BorderRadius.circular(8),
-                            child: Image.network(
-                              t.receiptUrl!,
+                            child: Image.file(
+                              File(t.receiptPath!),
                               width: 64,
                               height: 48,
                               fit: BoxFit.cover,
@@ -3011,18 +3735,31 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                 color: Colors.grey,
                               ),
                             ),
-                          ),
-                        )
-                      : const Icon(
-                          Icons.receipt_long,
-                          size: 20,
-                          color: Colors.grey,
-                        ),
+                          )
+                        : t.receiptUrl != null
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.network(
+                                  t.receiptUrl!,
+                                  width: 64,
+                                  height: 48,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, _, _) => const Icon(
+                                    Icons.broken_image,
+                                    size: 20,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                              )
+                            : const Icon(
+                                Icons.receipt_long,
+                                size: 20,
+                                color: Colors.grey,
+                              ),
+                    alignment: Alignment.center,
+                  ),
                 ),
               ],
-              onLongPress: () {
-                _showTransactionOptions(context, t);
-              },
             );
           }).toList(),
         ),
@@ -3034,7 +3771,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       title: const Text(
-        "Deleted Transactions",
+        "Cleared Transactions",
         style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
       ),
       children: [
@@ -3044,7 +3781,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                "No deleted transactions.",
+                "No cleared transactions.",
                 style: TextStyle(color: Colors.grey),
               ),
             ),

@@ -28,7 +28,7 @@ class DatabaseHelper {
     return await openDatabase(
       path,
 
-      version: 4,
+      version: 5,
 
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
@@ -49,7 +49,9 @@ note TEXT,
 
 date TEXT,
 
-iGave INTEGER
+iGave INTEGER,
+
+receiptPath TEXT
 
 )
 ''');
@@ -68,6 +70,16 @@ iGave INTEGER
     }
     if (oldVersion < 4) {
       await _createMigrationMetaTable(db);
+    }
+    if (oldVersion < 5) {
+      await db.execute(
+        'ALTER TABLE transactions ADD COLUMN receiptPath TEXT',
+      );
+      if (oldVersion >= 3) {
+        await db.execute(
+          'ALTER TABLE deleted_entries ADD COLUMN receiptPath TEXT',
+        );
+      }
     }
   }
 
@@ -103,7 +115,9 @@ amount REAL,
 
 isGiven INTEGER,
 
-clearedDate TEXT
+clearedDate TEXT,
+
+receiptPath TEXT
 
 )
 ''');
@@ -206,6 +220,7 @@ value TEXT
         'amount': entry['amount'],
         'isGiven': entry['iGave'],
         'clearedDate': _formatDate(DateTime.now()),
+        'receiptPath': entry['receiptPath'],
       });
 
       await txn.delete('transactions', where: 'id = ?', whereArgs: [entryId]);
@@ -266,6 +281,7 @@ value TEXT
         'note': deletedEntry['note'],
         'date': deletedEntry['date'],
         'iGave': deletedEntry['isGiven'],
+        'receiptPath': deletedEntry['receiptPath'],
       });
 
       await txn.delete(
