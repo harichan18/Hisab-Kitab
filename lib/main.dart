@@ -1110,6 +1110,7 @@ class _AddFriendPageState extends State<AddFriendPage> {
     final name = data?['name'] as String? ?? '';
     final email = data?['email'] as String? ?? '';
     final friendCode = data?['friendCode'] as String? ?? '';
+    final photoUrl = data?['photoUrl'] as String?;
 
     return Scaffold(
       appBar: AppBar(title: const Text("Add Friend"), centerTitle: true),
@@ -1153,8 +1154,15 @@ class _AddFriendPageState extends State<AddFriendPage> {
                       children: [
                         ListTile(
                           contentPadding: EdgeInsets.zero,
-                          leading: const CircleAvatar(
-                            child: Icon(Icons.person),
+                          leading: CircleAvatar(
+                            backgroundImage:
+                                photoUrl != null && photoUrl.isNotEmpty
+                                    ? NetworkImage(photoUrl)
+                                    : null,
+                            child:
+                                photoUrl == null || photoUrl.isEmpty
+                                    ? const Icon(Icons.person)
+                                    : null,
                           ),
                           title: Text(
                             name.isEmpty ? "No name" : name,
@@ -2532,6 +2540,7 @@ class _HomePageState extends State<HomePage> {
               date: dateController.text.trim(),
               iGave: isPlus,
               firebaseId: firebaseId,
+              createdBy: FirebaseAuth.instance.currentUser?.uid,
               receiptPath: receiptPath,
             );
 
@@ -3174,6 +3183,7 @@ class _AddPageState extends State<AddPage> {
         id: widget.transaction?.id,
         firebaseId: widget.transaction?.firebaseId ?? firebaseId,
         peerUserId: widget.transaction?.peerUserId,
+        createdBy: widget.transaction?.createdBy ?? currentUser?.uid,
         receiptUrl: widget.transaction?.receiptUrl,
         receiptPath: receiptPath,
         friendName: friendController.text.trim(),
@@ -3677,6 +3687,8 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   }
 
   void _showTransactionOptions(BuildContext context, TransactionModel t) {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    final canEdit = t.createdBy == null || t.createdBy == currentUid;
     showModalBottomSheet(
       context: context,
       builder: (_) {
@@ -3684,21 +3696,22 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              ListTile(
-                leading: const Icon(Icons.edit),
-                title: const Text("Edit"),
-                onTap: () async {
-                  Navigator.pop(context);
-                  final result = await Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => AddPage(transaction: t)),
-                  );
-                  if (result == true &&
-                      FirebaseAuth.instance.currentUser == null) {
-                    loadPersonTransactions();
-                  }
-                },
-              ),
+              if (canEdit)
+                ListTile(
+                  leading: const Icon(Icons.edit),
+                  title: const Text("Edit"),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    final result = await Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => AddPage(transaction: t)),
+                    );
+                    if (result == true &&
+                        FirebaseAuth.instance.currentUser == null) {
+                      loadPersonTransactions();
+                    }
+                  },
+                ),
               ListTile(
                 leading: const Icon(Icons.cleaning_services),
                 title: const Text("Clear Transaction"),
