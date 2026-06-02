@@ -2,6 +2,7 @@ class TransactionModel {
   final int? id;
   final String? firebaseId;
   final String? peerUserId;
+  final String? createdBy;
   final String? receiptUrl;
   final String? receiptPath;
   final String friendName;
@@ -14,6 +15,7 @@ class TransactionModel {
     this.id,
     this.firebaseId,
     this.peerUserId,
+    this.createdBy,
     this.receiptUrl,
     this.receiptPath,
     required this.friendName,
@@ -43,6 +45,7 @@ class TransactionModel {
       'date': date,
       'iGave': iGave,
       if (peerUserId != null) 'peerUserId': peerUserId,
+      if (createdBy != null) 'createdBy': createdBy,
       if (receiptPath != null) 'receiptPath': receiptPath,
       if (receiptUrl != null) 'receiptUrl': receiptUrl,
     };
@@ -67,6 +70,7 @@ class TransactionModel {
     return TransactionModel(
       firebaseId: firebaseId,
       peerUserId: map['peerUserId'] as String?,
+      createdBy: map['createdBy'] as String?,
       receiptUrl: map['receiptUrl'] as String?,
       receiptPath: map['receiptPath'] as String?,
       friendName: map['friendName'] as String? ?? '',
@@ -81,6 +85,7 @@ class TransactionModel {
     int? id,
     String? firebaseId,
     String? peerUserId,
+    String? createdBy,
     String? receiptUrl,
     String? receiptPath,
     String? friendName,
@@ -93,6 +98,7 @@ class TransactionModel {
       id: id ?? this.id,
       firebaseId: firebaseId ?? this.firebaseId,
       peerUserId: peerUserId ?? this.peerUserId,
+      createdBy: createdBy ?? this.createdBy,
       receiptUrl: receiptUrl ?? this.receiptUrl,
       receiptPath: receiptPath ?? this.receiptPath,
       friendName: friendName ?? this.friendName,
