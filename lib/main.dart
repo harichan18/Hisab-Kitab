@@ -16,7 +16,6 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_view/photo_view.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'database/database_helper.dart';
@@ -383,6 +382,7 @@ class _LoginPageState extends State<LoginPage> {
         final existingDoc = await userDocRef.get();
         final existingPhotoUrl = existingDoc.data()?['photoUrl'] as String?;
         final existingUpiId = existingDoc.data()?['upiId'] as String?;
+        final existingMobileNumber = existingDoc.data()?['mobileNumber'] as String?;
         final photoUrl = (existingPhotoUrl != null && existingPhotoUrl.isNotEmpty)
             ? existingPhotoUrl
             : (user.photoURL ?? googleUser.photoUrl);
@@ -393,6 +393,7 @@ class _LoginPageState extends State<LoginPage> {
           'photoUrl': photoUrl,
           'friendCode': friendCode,
           'upiId': existingUpiId ?? '',
+          'mobileNumber': existingMobileNumber ?? '',
           'provider': 'google',
           'updatedAt': FieldValue.serverTimestamp(),
           'createdAt': FieldValue.serverTimestamp(),
@@ -655,10 +656,14 @@ class _ProfilePageState extends State<ProfilePage> {
   bool _isSavingUpi = false;
   final TextEditingController _upiController = TextEditingController();
   bool _upiInitialized = false;
+  bool _isSavingMobile = false;
+  final TextEditingController _mobileController = TextEditingController();
+  bool _mobileInitialized = false;
 
   @override
   void dispose() {
     _upiController.dispose();
+    _mobileController.dispose();
     super.dispose();
   }
 
@@ -697,6 +702,7 @@ class _ProfilePageState extends State<ProfilePage> {
       'name': user.displayName ?? '',
       'friendCode': friendCode,
       'upiId': '',
+      'mobileNumber': '',
       'createdAt': FieldValue.serverTimestamp(),
     });
 
@@ -845,6 +851,40 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  Future<void> _saveMobile() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    setState(() {
+      _isSavingMobile = true;
+    });
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({'mobileNumber': _mobileController.text.trim()});
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Mobile number updated successfully.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update mobile number: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSavingMobile = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -864,6 +904,10 @@ class _ProfilePageState extends State<ProfilePage> {
           if (!_upiInitialized) {
             _upiController.text = data['upiId'] as String? ?? '';
             _upiInitialized = true;
+          }
+          if (!_mobileInitialized) {
+            _mobileController.text = data['mobileNumber'] as String? ?? '';
+            _mobileInitialized = true;
           }
           final name = data['name'] as String? ?? '';
           final email = data['email'] as String? ?? '';
@@ -986,6 +1030,52 @@ class _ProfilePageState extends State<ProfilePage> {
                           foregroundColor: Colors.black,
                         ),
                         child: _isSavingUpi
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : const Text("Save"),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  const Text(
+                    "Mobile Number",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _mobileController,
+                          keyboardType: TextInputType.phone,
+                          decoration: const InputDecoration(
+                            hintText: "Enter mobile number (e.g., 9876543210)",
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 12,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: _isSavingMobile ? null : _saveMobile,
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 16,
+                          ),
+                          backgroundColor: Colors.amber,
+                          foregroundColor: Colors.black,
+                        ),
+                        child: _isSavingMobile
                             ? const SizedBox(
                                 width: 20,
                                 height: 20,
@@ -3752,6 +3842,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
   StreamSubscription<List<DeletedEntryModel>>? _deletedSubscription;
   Future<String?>? _friendPhotoFuture;
   Future<String?>? _friendUpiFuture;
+  Future<String?>? _friendMobileFuture;
   String? _localNickname;
   bool _launchedUpiPayment = false;
 
@@ -3766,6 +3857,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
       startRealtimeSync();
       _friendPhotoFuture = _fetchFriendPhotoUrl();
       _friendUpiFuture = _fetchFriendUpiId();
+      _friendMobileFuture = _fetchFriendMobileNumber();
     }
   }
 
@@ -3883,6 +3975,35 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
       debugPrint('Error fetching friend UPI ID: $e');
       return null;
     }
+  }
+
+  Future<String?> _fetchFriendMobileNumber() async {
+    try {
+      String? uid = widget.peerUserId;
+      if (uid == null || uid.isEmpty) {
+        uid = await FirebaseDataService.resolvePeerUserIdByFriendName(widget.friendName);
+      }
+      if (uid == null || uid.isEmpty) {
+        return null;
+      }
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
+      final data = userDoc.data();
+      return data?['mobileNumber'] as String?;
+    } catch (e) {
+      debugPrint('Error fetching friend mobile number: $e');
+      return null;
+    }
+  }
+
+  String _normalizePhoneNumber(String rawPhone) {
+    String digits = rawPhone.replaceAll(RegExp(r'\D'), '');
+    if (digits.length == 10) {
+      return '91$digits';
+    }
+    return digits;
   }
 
   @override
@@ -4683,27 +4804,115 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                           ],
                         ),
                     ] else if (netBalance > 0) ...[
-                      ElevatedButton.icon(
-                        onPressed: () {
-                          final amountText = netBalance.toStringAsFixed(0);
-                          final message = 'Hi $_displayName,\n\n'
-                              'According to Hisab Kitab, you currently owe ₹$amountText.\n\n'
-                              'You can settle it whenever convenient.\n\n'
-                              'Thanks 🙂';
-                          // ignore: deprecated_member_use
-                          Share.share(message);
-                        },
-                        icon: const Icon(Icons.notifications_active),
-                        label: const Text("Send Reminder"),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.orangeAccent,
-                          foregroundColor: Colors.white,
-                          minimumSize: const Size(double.infinity, 50),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+                      if (_friendMobileFuture != null)
+                        FutureBuilder<String?>(
+                          future: _friendMobileFuture,
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState == ConnectionState.waiting) {
+                              return const Padding(
+                                padding: EdgeInsets.only(top: 8),
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              );
+                            }
+                            final mobileNumber = snapshot.data;
+                            return ElevatedButton.icon(
+                              onPressed: () async {
+                                if (mobileNumber == null || mobileNumber.trim().isEmpty) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text("Friend has not added a mobile number."),
+                                      ),
+                                    );
+                                  }
+                                  return;
+                                }
+
+                                final normalizedMobile = _normalizePhoneNumber(mobileNumber.trim());
+                                if (normalizedMobile.isEmpty) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text("Friend has not added a mobile number."),
+                                      ),
+                                    );
+                                  }
+                                  return;
+                                }
+
+                                final amountText = netBalance.toStringAsFixed(0);
+                                final message = 'Hi $_displayName,\n\n'
+                                    'According to Hisab Kitab, you currently owe ₹$amountText.\n\n'
+                                    'You can settle it whenever convenient.\n\n'
+                                    'Thanks 🙂';
+
+                                final whatsappUri = Uri.parse(
+                                  'https://wa.me/$normalizedMobile?text=${Uri.encodeComponent(message)}',
+                                );
+
+                                try {
+                                  final launched = await launchUrl(
+                                    whatsappUri,
+                                    mode: LaunchMode.externalApplication,
+                                  );
+                                  if (!launched) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Could not launch WhatsApp.'),
+                                        ),
+                                      );
+                                    }
+                                  }
+                                } catch (e) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('Could not launch WhatsApp: $e'),
+                                      ),
+                                    );
+                                  }
+                                }
+                              },
+                              icon: const Icon(Icons.notifications_active),
+                              label: const Text("Send Reminder"),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.orangeAccent,
+                                foregroundColor: Colors.white,
+                                minimumSize: const Size(double.infinity, 50),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            );
+                          },
+                        )
+                      else
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text("Friend has not added a mobile number."),
+                                ),
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.notifications_active),
+                          label: const Text("Send Reminder"),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orangeAccent,
+                            foregroundColor: Colors.white,
+                            minimumSize: const Size(double.infinity, 50),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
                           ),
                         ),
-                      ),
                     ],
                   ],
                   const SizedBox(height: 20),
