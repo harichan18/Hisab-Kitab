@@ -3743,7 +3743,7 @@ class PersonDetailPage extends StatefulWidget {
   State<PersonDetailPage> createState() => _PersonDetailPageState();
 }
 
-class _PersonDetailPageState extends State<PersonDetailPage> {
+class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBindingObserver {
   List<TransactionModel> personTransactions = [];
   List<DeletedEntryModel> deletedTransactions = [];
   bool isLoading = true;
@@ -3752,10 +3752,12 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   Future<String?>? _friendPhotoFuture;
   Future<String?>? _friendUpiFuture;
   String? _localNickname;
+  bool _launchedUpiPayment = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadNickname();
     if (FirebaseAuth.instance.currentUser == null) {
       loadPersonTransactions();
@@ -3884,6 +3886,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _transactionsSubscription?.cancel();
     _deletedSubscription?.cancel();
     super.dispose();
@@ -3972,6 +3975,29 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
     return totalGiven - totalTaken;
   }
 
+  Future<void> _executeSettleAccount() async {
+    final transactionsToProcess = List<TransactionModel>.from(personTransactions);
+
+    for (final t in transactionsToProcess) {
+      if (t.firebaseId != null) {
+        await FirebaseDataService.clearTransaction(t);
+      }
+      if (t.id != null) {
+        await DatabaseHelper.instance.clearEntry(t.id!);
+      }
+    }
+
+    if (FirebaseAuth.instance.currentUser == null) {
+      await loadPersonTransactions();
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Account cleared successfully.')),
+      );
+    }
+  }
+
   Future<void> _clearAccount() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -3996,25 +4022,38 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
 
     if (confirmed != true || !mounted) return;
 
-    final transactionsToProcess = List<TransactionModel>.from(personTransactions);
+    await _executeSettleAccount();
+  }
 
-    for (final t in transactionsToProcess) {
-      if (t.firebaseId != null) {
-        await FirebaseDataService.clearTransaction(t);
-      }
-      if (t.id != null) {
-        await DatabaseHelper.instance.clearEntry(t.id!);
-      }
+  Future<void> _showUpiSettlementDialog() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Payment Completed?'),
+        content: const Text('Did you successfully complete the UPI payment?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not Now'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Settle Account'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      await _executeSettleAccount();
     }
+  }
 
-    if (FirebaseAuth.instance.currentUser == null) {
-      await loadPersonTransactions();
-    }
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Account cleared successfully.')),
-      );
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _launchedUpiPayment) {
+      _launchedUpiPayment = false;
+      _showUpiSettlementDialog();
     }
   }
 
@@ -4572,7 +4611,12 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                           );
                                           try {
                                             if (await canLaunchUrl(upiUri)) {
-                                              await launchUrl(upiUri, mode: LaunchMode.externalApplication);
+                                              final launched = await launchUrl(upiUri, mode: LaunchMode.externalApplication);
+                                              if (launched) {
+                                                setState(() {
+                                                  _launchedUpiPayment = true;
+                                                });
+                                              }
                                             } else {
                                               if (context.mounted) {
                                                 ScaffoldMessenger.of(context).showSnackBar(
