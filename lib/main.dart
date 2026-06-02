@@ -3503,6 +3503,52 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
     return totalGiven - totalTaken;
   }
 
+  Future<void> _clearAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Clear Account?'),
+        content: const Text(
+          'This will move all active transactions with this friend to Deleted Transactions.\n'
+          'You can restore them later from Deleted Transactions.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Clear Account'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final transactionsToProcess = List<TransactionModel>.from(personTransactions);
+
+    for (final t in transactionsToProcess) {
+      if (t.firebaseId != null) {
+        await FirebaseDataService.clearTransaction(t);
+      }
+      if (t.id != null) {
+        await DatabaseHelper.instance.clearEntry(t.id!);
+      }
+    }
+
+    if (FirebaseAuth.instance.currentUser == null) {
+      await loadPersonTransactions();
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Account cleared successfully.')),
+      );
+    }
+  }
+
   void _showTransactionOptions(BuildContext context, TransactionModel t) {
     showModalBottomSheet(
       context: context,
@@ -3857,7 +3903,25 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.friendName), centerTitle: true),
+      appBar: AppBar(
+        title: Text(widget.friendName),
+        centerTitle: true,
+        actions: [
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'clear_account') {
+                _clearAccount();
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem<String>(
+                value: 'clear_account',
+                child: Text('Clear Account'),
+              ),
+            ],
+          ),
+        ],
+      ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : personTransactions.isEmpty && deletedTransactions.isEmpty
