@@ -1115,11 +1115,12 @@ class _AddFriendPageState extends State<AddFriendPage> {
     return Scaffold(
       appBar: AppBar(title: const Text("Add Friend"), centerTitle: true),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
               TextField(
                 controller: friendCodeController,
                 textCapitalization: TextCapitalization.characters,
@@ -1212,6 +1213,7 @@ class _AddFriendPageState extends State<AddFriendPage> {
             ],
           ),
         ),
+      ),
       ),
     );
   }
@@ -2962,22 +2964,54 @@ class _HomePageState extends State<HomePage> {
                           return Card(
                             margin: const EdgeInsets.only(bottom: 12),
                             child: ListTile(
-                              leading: CircleAvatar(
-                                backgroundColor: balance >= 0
-                                    ? Colors.green.withValues(alpha: 0.2)
-                                    : Colors.red.withValues(alpha: 0.2),
-                                child: Text(
-                                  friendName.isNotEmpty
-                                      ? friendName[0].toUpperCase()
-                                      : '?',
-                                  style: TextStyle(
-                                    color: balance >= 0
-                                        ? Colors.green
-                                        : Colors.red,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
+                              leading: friend.uid == null || friend.uid!.isEmpty
+                                  ? CircleAvatar(
+                                      backgroundColor: balance >= 0
+                                          ? Colors.green.withValues(alpha: 0.2)
+                                          : Colors.red.withValues(alpha: 0.2),
+                                      child: Text(
+                                        friendName.isNotEmpty
+                                            ? friendName[0].toUpperCase()
+                                            : '?',
+                                        style: TextStyle(
+                                          color: balance >= 0
+                                              ? Colors.green
+                                              : Colors.red,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    )
+                                  : FutureBuilder<DocumentSnapshot>(
+                                      future: FirebaseFirestore.instance
+                                          .collection('users')
+                                          .doc(friend.uid)
+                                          .get(),
+                                      builder: (context, snapshot) {
+                                        final data = snapshot.data?.data() as Map<String, dynamic>?;
+                                        final photoUrl = data?['photoUrl'] as String?;
+                                        if (photoUrl != null && photoUrl.isNotEmpty) {
+                                          return CircleAvatar(
+                                            backgroundImage: NetworkImage(photoUrl),
+                                          );
+                                        }
+                                        return CircleAvatar(
+                                          backgroundColor: balance >= 0
+                                              ? Colors.green.withValues(alpha: 0.2)
+                                              : Colors.red.withValues(alpha: 0.2),
+                                          child: Text(
+                                            friendName.isNotEmpty
+                                                ? friendName[0].toUpperCase()
+                                                : '?',
+                                            style: TextStyle(
+                                              color: balance >= 0
+                                                  ? Colors.green
+                                                  : Colors.red,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
                               title: Text(
                                 friendName,
                                 maxLines: 1,
@@ -3053,15 +3087,16 @@ class _HomePageState extends State<HomePage> {
                                   ],
                                 ),
                               ),
-                              onTap: () async {
-                                await Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => PersonDetailPage(
-                                      friendName: friendName,
-                                    ),
-                                  ),
-                                );
+                               onTap: () async {
+                                 await Navigator.push(
+                                   context,
+                                   MaterialPageRoute(
+                                     builder: (_) => PersonDetailPage(
+                                       friendName: friendName,
+                                       peerUserId: friend.uid,
+                                     ),
+                                   ),
+                                 );
                                 await refreshDashboard();
                               },
                               onLongPress: () {
@@ -3526,8 +3561,13 @@ class TransactionDetailPage extends StatelessWidget {
 
 class PersonDetailPage extends StatefulWidget {
   final String friendName;
+  final String? peerUserId;
 
-  const PersonDetailPage({super.key, required this.friendName});
+  const PersonDetailPage({
+    super.key,
+    required this.friendName,
+    this.peerUserId,
+  });
 
   @override
   State<PersonDetailPage> createState() => _PersonDetailPageState();
@@ -3539,6 +3579,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   bool isLoading = true;
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
   StreamSubscription<List<DeletedEntryModel>>? _deletedSubscription;
+  Future<String?>? _friendPhotoFuture;
 
   @override
   void initState() {
@@ -3547,6 +3588,28 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
       loadPersonTransactions();
     } else {
       startRealtimeSync();
+      _friendPhotoFuture = _fetchFriendPhotoUrl();
+    }
+  }
+
+  Future<String?> _fetchFriendPhotoUrl() async {
+    try {
+      String? uid = widget.peerUserId;
+      if (uid == null || uid.isEmpty) {
+        uid = await FirebaseDataService.resolvePeerUserIdByFriendName(widget.friendName);
+      }
+      if (uid == null || uid.isEmpty) {
+        return null;
+      }
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
+      final data = userDoc.data();
+      return data?['photoUrl'] as String?;
+    } catch (e) {
+      debugPrint('Error fetching friend photo url: $e');
+      return null;
     }
   }
 
@@ -4075,6 +4138,37 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: [
+                  if (_friendPhotoFuture != null)
+                    FutureBuilder<String?>(
+                      future: _friendPhotoFuture,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState == ConnectionState.done &&
+                            snapshot.hasData &&
+                            snapshot.data != null &&
+                            snapshot.data!.isNotEmpty) {
+                          final photoUrl = snapshot.data!;
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CircleAvatar(
+                                radius: 40,
+                                backgroundImage: NetworkImage(photoUrl),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                widget.friendName,
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                            ],
+                          );
+                        }
+                        return const SizedBox.shrink();
+                      },
+                    ),
                   // Summary Card for this Person
                   Container(
                     width: double.infinity,
