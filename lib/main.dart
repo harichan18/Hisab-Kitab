@@ -16,6 +16,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_view/photo_view.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'database/database_helper.dart';
 import 'firebase_options.dart';
@@ -4537,25 +4538,6 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                   if (netBalance != 0) ...[
                     const SizedBox(height: 16),
                     if (netBalance < 0) ...[
-                      ElevatedButton.icon(
-                        onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Payment launching is not implemented yet.'),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.payment),
-                        label: const Text("Pay via UPI"),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blueAccent,
-                          foregroundColor: Colors.white,
-                          minimumSize: const Size(double.infinity, 50),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
                       if (_friendUpiFuture != null)
                         FutureBuilder<String?>(
                           future: _friendUpiFuture,
@@ -4571,28 +4553,95 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                               );
                             }
                             final upiId = snapshot.data;
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(
-                                upiId == null || upiId.isEmpty
-                                    ? "UPI ID: Not Set"
-                                    : "UPI ID: $upiId",
-                                style: const TextStyle(
-                                  color: Colors.grey,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w500,
+                            final hasUpi = upiId != null && upiId.trim().isNotEmpty;
+                            return Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ElevatedButton.icon(
+                                  onPressed: hasUpi
+                                      ? () async {
+                                          final upiUri = Uri(
+                                            scheme: 'upi',
+                                            path: 'pay',
+                                            queryParameters: {
+                                              'pa': upiId.trim(),
+                                              'pn': _displayName,
+                                              'am': netBalance.abs().toStringAsFixed(2),
+                                              'cu': 'INR',
+                                            },
+                                          );
+                                          try {
+                                            if (await canLaunchUrl(upiUri)) {
+                                              await launchUrl(upiUri, mode: LaunchMode.externalApplication);
+                                            } else {
+                                              if (context.mounted) {
+                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                  const SnackBar(
+                                                    content: Text('No UPI app available to handle this payment.'),
+                                                  ),
+                                                );
+                                              }
+                                            }
+                                          } catch (e) {
+                                            if (context.mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(
+                                                  content: Text('Could not launch UPI payment: $e'),
+                                                ),
+                                              );
+                                            }
+                                          }
+                                        }
+                                      : null,
+                                  icon: const Icon(Icons.payment),
+                                  label: const Text("Pay via UPI"),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.blueAccent,
+                                    foregroundColor: Colors.white,
+                                    minimumSize: const Size(double.infinity, 50),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
                                 ),
-                              ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  hasUpi
+                                      ? "UPI ID: $upiId"
+                                      : "Friend has not added a UPI ID.",
+                                  style: const TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
                             );
                           },
                         )
                       else
-                        const Padding(
-                          padding: EdgeInsets.only(top: 8),
-                          child: Text(
-                            "UPI ID: Not available offline",
-                            style: TextStyle(color: Colors.grey, fontSize: 14),
-                          ),
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            ElevatedButton.icon(
+                              onPressed: null,
+                              icon: const Icon(Icons.payment),
+                              label: const Text("Pay via UPI"),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.blueAccent,
+                                foregroundColor: Colors.white,
+                                minimumSize: const Size(double.infinity, 50),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              "UPI ID: Not available offline",
+                              style: TextStyle(color: Colors.grey, fontSize: 14),
+                            ),
+                          ],
                         ),
                     ] else if (netBalance > 0) ...[
                       ElevatedButton.icon(
