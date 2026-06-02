@@ -4264,7 +4264,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_displayName),
+        title: Text(widget.friendName),
         centerTitle: true,
         actions: [
           PopupMenuButton<String>(
