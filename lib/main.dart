@@ -2499,6 +2499,7 @@ class _HomePageState extends State<HomePage> {
 
             String? firebaseId;
             String? receiptPath;
+            String? receiptUrl;
 
             if (receiptImage != null) {
               if (currentUser == null) {
@@ -2526,6 +2527,29 @@ class _HomePageState extends State<HomePage> {
                     firebaseId: firebaseId,
                     scope: scope,
                   );
+
+                  // Upload to Cloudinary
+                  try {
+                    final uri = Uri.parse(
+                      'https://api.cloudinary.com/v1_1/dxwf10vjg/image/upload',
+                    );
+                    final request = http.MultipartRequest('POST', uri)
+                      ..fields['upload_preset'] = 'receipt_upload'
+                      ..files.add(await http.MultipartFile.fromPath('file', compressedFile.path));
+
+                    final streamedResponse = await request.send();
+                    final responseBody = await streamedResponse.stream.bytesToString();
+
+                    if (streamedResponse.statusCode == 200) {
+                      final jsonResponse = jsonDecode(responseBody) as Map<String, dynamic>;
+                      receiptUrl = jsonResponse['secure_url'] as String?;
+                      _receiptLog(scope, 'Cloudinary upload succeeded: $receiptUrl');
+                    } else {
+                      _receiptLog(scope, 'Cloudinary upload failed: ${streamedResponse.statusCode}');
+                    }
+                  } catch (cloudinaryError, cloudinarySt) {
+                    _receiptLog(scope, 'Cloudinary upload failed with exception: $cloudinaryError\n$cloudinarySt');
+                  }
                 } else {
                   _receiptLog(
                     scope,
@@ -2544,6 +2568,7 @@ class _HomePageState extends State<HomePage> {
               firebaseId: firebaseId,
               createdBy: FirebaseAuth.instance.currentUser?.uid,
               receiptPath: receiptPath,
+              receiptUrl: receiptUrl,
             );
 
             _receiptLog(
@@ -3180,6 +3205,7 @@ class _AddPageState extends State<AddPage> {
 
       String? firebaseId = widget.transaction?.firebaseId;
       String? receiptPath = widget.transaction?.receiptPath;
+      String? receiptUrl = widget.transaction?.receiptUrl;
 
       if (receiptImage != null) {
         if (currentUser == null) {
@@ -3205,6 +3231,29 @@ class _AddPageState extends State<AddPage> {
               firebaseId: firebaseId,
               scope: scope,
             );
+
+            // Upload to Cloudinary
+            try {
+              final uri = Uri.parse(
+                'https://api.cloudinary.com/v1_1/dxwf10vjg/image/upload',
+              );
+              final request = http.MultipartRequest('POST', uri)
+                ..fields['upload_preset'] = 'receipt_upload'
+                ..files.add(await http.MultipartFile.fromPath('file', compressed.path));
+
+              final streamedResponse = await request.send();
+              final responseBody = await streamedResponse.stream.bytesToString();
+
+              if (streamedResponse.statusCode == 200) {
+                final jsonResponse = jsonDecode(responseBody) as Map<String, dynamic>;
+                receiptUrl = jsonResponse['secure_url'] as String?;
+                _receiptLog(scope, 'Cloudinary upload succeeded: $receiptUrl');
+              } else {
+                _receiptLog(scope, 'Cloudinary upload failed: ${streamedResponse.statusCode}');
+              }
+            } catch (cloudinaryError, cloudinarySt) {
+              _receiptLog(scope, 'Cloudinary upload failed with exception: $cloudinaryError\n$cloudinarySt');
+            }
           } else {
             _receiptLog(
               scope,
@@ -3219,7 +3268,7 @@ class _AddPageState extends State<AddPage> {
         firebaseId: widget.transaction?.firebaseId ?? firebaseId,
         peerUserId: widget.transaction?.peerUserId,
         createdBy: widget.transaction?.createdBy ?? currentUser?.uid,
-        receiptUrl: widget.transaction?.receiptUrl,
+        receiptUrl: receiptUrl,
         receiptPath: receiptPath,
         friendName: friendController.text.trim(),
         amount: double.parse(amountController.text),
@@ -3970,41 +4019,48 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                 ),
                 DataCell(
                   buildCell(
-                    (t.receiptPath != null && t.receiptPath!.isNotEmpty)
-                        ? ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: Image.file(
-                              File(t.receiptPath!),
-                              width: 64,
-                              height: 48,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, _, _) => const Icon(
-                                Icons.broken_image,
-                                size: 20,
-                                color: Colors.grey,
-                              ),
+                    (() {
+                      final hasLocal = t.receiptPath != null &&
+                          t.receiptPath!.isNotEmpty &&
+                          File(t.receiptPath!).existsSync();
+                      if (hasLocal) {
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.file(
+                            File(t.receiptPath!),
+                            width: 64,
+                            height: 48,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => const Icon(
+                              Icons.broken_image,
+                              size: 20,
+                              color: Colors.grey,
                             ),
-                          )
-                        : t.receiptUrl != null
-                            ? ClipRRect(
-                                borderRadius: BorderRadius.circular(8),
-                                child: Image.network(
-                                  t.receiptUrl!,
-                                  width: 64,
-                                  height: 48,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, _, _) => const Icon(
-                                    Icons.broken_image,
-                                    size: 20,
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                              )
-                            : const Icon(
-                                Icons.receipt_long,
-                                size: 20,
-                                color: Colors.grey,
-                              ),
+                          ),
+                        );
+                      } else if (t.receiptUrl != null && t.receiptUrl!.isNotEmpty) {
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.network(
+                            t.receiptUrl!,
+                            width: 64,
+                            height: 48,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => const Icon(
+                              Icons.broken_image,
+                              size: 20,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        );
+                      } else {
+                        return const Icon(
+                          Icons.receipt_long,
+                          size: 20,
+                          color: Colors.grey,
+                        );
+                      }
+                    })(),
                     alignment: Alignment.center,
                   ),
                 ),
