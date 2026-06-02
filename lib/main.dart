@@ -1,6 +1,7 @@
 // ignore_for_file: avoid_print
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -10,6 +11,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -374,16 +376,24 @@ class _LoginPageState extends State<LoginPage> {
 
     await _runSignInStep<void>(
       'Firestore users/${user.uid} upsert',
-      () => FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-        'uid': user.uid,
-        'name': user.displayName ?? googleUser.displayName ?? '',
-        'email': user.email ?? googleUser.email,
-        'photoUrl': user.photoURL ?? googleUser.photoUrl,
-        'friendCode': friendCode,
-        'provider': 'google',
-        'updatedAt': FieldValue.serverTimestamp(),
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true)),
+      () async {
+        final userDocRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
+        final existingDoc = await userDocRef.get();
+        final existingPhotoUrl = existingDoc.data()?['photoUrl'] as String?;
+        final photoUrl = (existingPhotoUrl != null && existingPhotoUrl.isNotEmpty)
+            ? existingPhotoUrl
+            : (user.photoURL ?? googleUser.photoUrl);
+        await userDocRef.set({
+          'uid': user.uid,
+          'name': user.displayName ?? googleUser.displayName ?? '',
+          'email': user.email ?? googleUser.email,
+          'photoUrl': photoUrl,
+          'friendCode': friendCode,
+          'provider': 'google',
+          'updatedAt': FieldValue.serverTimestamp(),
+          'createdAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      },
     );
   }
 
@@ -628,8 +638,22 @@ class _SplashScreenState extends State<SplashScreen>
   }
 }
 
-class ProfilePage extends StatelessWidget {
+class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  bool _isUploading = false;
+  Future<DocumentSnapshot<Map<String, dynamic>>>? _profileFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _profileFuture = _loadProfile();
+  }
 
   Future<DocumentSnapshot<Map<String, dynamic>>> _loadProfile() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -702,12 +726,83 @@ class ProfilePage extends StatelessWidget {
     }
   }
 
+  Future<void> _pickAndUploadProfilePhoto() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    // 1. Pick image from gallery
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 80,
+    );
+    if (picked == null || !mounted) return;
+
+    setState(() => _isUploading = true);
+
+    try {
+      // 2. Compress the image
+      final tempDir = await getTemporaryDirectory();
+      final targetPath =
+          '${tempDir.path}/profile_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final compressed = await FlutterImageCompress.compressAndGetFile(
+        picked.path,
+        targetPath,
+        quality: 75,
+      );
+      final fileToUpload = compressed != null ? File(compressed.path) : File(picked.path);
+
+      // 3. Upload to Cloudinary
+      final uri = Uri.parse(
+        'https://api.cloudinary.com/v1_1/dxwf10vjg/image/upload',
+      );
+      final request = http.MultipartRequest('POST', uri)
+        ..fields['upload_preset'] = 'receipt_upload'
+        ..files.add(await http.MultipartFile.fromPath('file', fileToUpload.path));
+
+      final streamedResponse = await request.send();
+      final responseBody = await streamedResponse.stream.bytesToString();
+
+      if (streamedResponse.statusCode != 200) {
+        throw Exception('Cloudinary upload failed: ${streamedResponse.statusCode}');
+      }
+
+      final jsonResponse = jsonDecode(responseBody) as Map<String, dynamic>;
+      final secureUrl = jsonResponse['secure_url'] as String?;
+
+      if (secureUrl == null || secureUrl.isEmpty) {
+        throw Exception('Cloudinary response missing secure_url');
+      }
+
+      // 4. Update Firestore
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({'photoUrl': secureUrl});
+
+      // 5. Refresh profile UI
+      if (mounted) {
+        setState(() {
+          _isUploading = false;
+          _profileFuture = _loadProfile();
+        });
+      }
+    } catch (e) {
+      debugPrint('[Profile] Photo upload failed: $e');
+      if (mounted) {
+        setState(() => _isUploading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to update profile photo.')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text("Profile"), centerTitle: true),
       body: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        future: _loadProfile(),
+        future: _profileFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -731,14 +826,46 @@ class ProfilePage extends StatelessWidget {
                 children: [
                   const SizedBox(height: 24),
                   Center(
-                    child: CircleAvatar(
-                      radius: 56,
-                      backgroundImage: photoUrl == null || photoUrl.isEmpty
-                          ? null
-                          : NetworkImage(photoUrl),
-                      child: photoUrl == null || photoUrl.isEmpty
-                          ? const Icon(Icons.person, size: 56)
-                          : null,
+                    child: GestureDetector(
+                      onTap: _isUploading ? null : _pickAndUploadProfilePhoto,
+                      child: Stack(
+                        children: [
+                          CircleAvatar(
+                            radius: 56,
+                            backgroundImage: photoUrl == null || photoUrl.isEmpty
+                                ? null
+                                : NetworkImage(photoUrl),
+                            child: photoUrl == null || photoUrl.isEmpty
+                                ? const Icon(Icons.person, size: 56)
+                                : null,
+                          ),
+                          Positioned(
+                            bottom: 0,
+                            right: 0,
+                            child: Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.primary,
+                                shape: BoxShape.circle,
+                              ),
+                              child: _isUploading
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.camera_alt,
+                                      size: 18,
+                                      color: Colors.white,
+                                    ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                   const SizedBox(height: 24),
