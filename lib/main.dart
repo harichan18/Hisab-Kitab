@@ -380,6 +380,7 @@ class _LoginPageState extends State<LoginPage> {
         final userDocRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
         final existingDoc = await userDocRef.get();
         final existingPhotoUrl = existingDoc.data()?['photoUrl'] as String?;
+        final existingUpiId = existingDoc.data()?['upiId'] as String?;
         final photoUrl = (existingPhotoUrl != null && existingPhotoUrl.isNotEmpty)
             ? existingPhotoUrl
             : (user.photoURL ?? googleUser.photoUrl);
@@ -389,6 +390,7 @@ class _LoginPageState extends State<LoginPage> {
           'email': user.email ?? googleUser.email,
           'photoUrl': photoUrl,
           'friendCode': friendCode,
+          'upiId': existingUpiId ?? '',
           'provider': 'google',
           'updatedAt': FieldValue.serverTimestamp(),
           'createdAt': FieldValue.serverTimestamp(),
@@ -648,6 +650,15 @@ class ProfilePage extends StatefulWidget {
 class _ProfilePageState extends State<ProfilePage> {
   bool _isUploading = false;
   Future<DocumentSnapshot<Map<String, dynamic>>>? _profileFuture;
+  bool _isSavingUpi = false;
+  final TextEditingController _upiController = TextEditingController();
+  bool _upiInitialized = false;
+
+  @override
+  void dispose() {
+    _upiController.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -683,6 +694,7 @@ class _ProfilePageState extends State<ProfilePage> {
       'email': user.email ?? '',
       'name': user.displayName ?? '',
       'friendCode': friendCode,
+      'upiId': '',
       'createdAt': FieldValue.serverTimestamp(),
     });
 
@@ -797,6 +809,40 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  Future<void> _saveUpi() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    setState(() {
+      _isSavingUpi = true;
+    });
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({'upiId': _upiController.text.trim()});
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('UPI ID updated successfully.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update UPI ID: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSavingUpi = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -813,6 +859,10 @@ class _ProfilePageState extends State<ProfilePage> {
           }
 
           final data = snapshot.data?.data() ?? {};
+          if (!_upiInitialized) {
+            _upiController.text = data['upiId'] as String? ?? '';
+            _upiInitialized = true;
+          }
           final name = data['name'] as String? ?? '';
           final email = data['email'] as String? ?? '';
           final photoUrl = data['photoUrl'] as String?;
@@ -900,6 +950,51 @@ class _ProfilePageState extends State<ProfilePage> {
                       fontWeight: FontWeight.bold,
                       letterSpacing: 1.5,
                     ),
+                  ),
+                  const SizedBox(height: 32),
+                  const Text(
+                    "UPI ID",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _upiController,
+                          decoration: const InputDecoration(
+                            hintText: "Enter UPI ID (e.g., name@okbank)",
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 12,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: _isSavingUpi ? null : _saveUpi,
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 16,
+                          ),
+                          backgroundColor: Colors.amber,
+                          foregroundColor: Colors.black,
+                        ),
+                        child: _isSavingUpi
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : const Text("Save"),
+                      ),
+                    ],
                   ),
                   const Spacer(),
                   SizedBox(
@@ -3654,6 +3749,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
   StreamSubscription<List<DeletedEntryModel>>? _deletedSubscription;
   Future<String?>? _friendPhotoFuture;
+  Future<String?>? _friendUpiFuture;
   String? _localNickname;
 
   @override
@@ -3665,6 +3761,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
     } else {
       startRealtimeSync();
       _friendPhotoFuture = _fetchFriendPhotoUrl();
+      _friendUpiFuture = _fetchFriendUpiId();
     }
   }
 
@@ -3759,6 +3856,27 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
       return data?['photoUrl'] as String?;
     } catch (e) {
       debugPrint('Error fetching friend photo url: $e');
+      return null;
+    }
+  }
+
+  Future<String?> _fetchFriendUpiId() async {
+    try {
+      String? uid = widget.peerUserId;
+      if (uid == null || uid.isEmpty) {
+        uid = await FirebaseDataService.resolvePeerUserIdByFriendName(widget.friendName);
+      }
+      if (uid == null || uid.isEmpty) {
+        return null;
+      }
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
+      final data = userDoc.data();
+      return data?['upiId'] as String?;
+    } catch (e) {
+      debugPrint('Error fetching friend UPI ID: $e');
       return null;
     }
   }
@@ -4416,6 +4534,88 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                       ],
                     ),
                   ),
+                  if (netBalance != 0) ...[
+                    const SizedBox(height: 16),
+                    if (netBalance < 0) ...[
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Payment launching is not implemented yet.'),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.payment),
+                        label: const Text("Pay via UPI"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blueAccent,
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(double.infinity, 50),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                      if (_friendUpiFuture != null)
+                        FutureBuilder<String?>(
+                          future: _friendUpiFuture,
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState == ConnectionState.waiting) {
+                              return const Padding(
+                                padding: EdgeInsets.only(top: 8),
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              );
+                            }
+                            final upiId = snapshot.data;
+                            return Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Text(
+                                upiId == null || upiId.isEmpty
+                                    ? "UPI ID: Not Set"
+                                    : "UPI ID: $upiId",
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            );
+                          },
+                        )
+                      else
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text(
+                            "UPI ID: Not available offline",
+                            style: TextStyle(color: Colors.grey, fontSize: 14),
+                          ),
+                        ),
+                    ] else if (netBalance > 0) ...[
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Reminder feature is not implemented yet.'),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.notifications_active),
+                        label: const Text("Send Reminder"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orangeAccent,
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(double.infinity, 50),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                   const SizedBox(height: 20),
                   Expanded(
                     child: SingleChildScrollView(
