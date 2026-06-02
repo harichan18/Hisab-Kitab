@@ -16,6 +16,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_view/photo_view.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'database/database_helper.dart';
@@ -4599,24 +4600,18 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                 ElevatedButton.icon(
                                   onPressed: hasUpi
                                       ? () async {
-                                          final upiUri = Uri(
-                                            scheme: 'upi',
-                                            path: 'pay',
-                                            queryParameters: {
-                                              'pa': upiId.trim(),
-                                              'pn': _displayName,
-                                              'am': netBalance.abs().toStringAsFixed(2),
-                                              'cu': 'INR',
-                                            },
+                                          final upiUri = Uri.parse(
+                                            'upi://pay?pa=${upiId.trim()}&pn=${Uri.encodeComponent(_displayName)}&am=${netBalance.abs().toStringAsFixed(2)}&cu=INR',
                                           );
                                           try {
-                                            if (await canLaunchUrl(upiUri)) {
-                                              final launched = await launchUrl(upiUri, mode: LaunchMode.externalApplication);
-                                              if (launched) {
-                                                setState(() {
-                                                  _launchedUpiPayment = true;
-                                                });
-                                              }
+                                            final launched = await launchUrl(
+                                              upiUri,
+                                              mode: LaunchMode.externalApplication,
+                                            );
+                                            if (launched) {
+                                              setState(() {
+                                                _launchedUpiPayment = true;
+                                              });
                                             } else {
                                               if (context.mounted) {
                                                 ScaffoldMessenger.of(context).showSnackBar(
@@ -4690,11 +4685,13 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                     ] else if (netBalance > 0) ...[
                       ElevatedButton.icon(
                         onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Reminder feature is not implemented yet.'),
-                            ),
-                          );
+                          final amountText = netBalance.toStringAsFixed(0);
+                          final message = 'Hi $_displayName,\n\n'
+                              'According to Hisab Kitab, you currently owe ₹$amountText.\n\n'
+                              'You can settle it whenever convenient.\n\n'
+                              'Thanks 🙂';
+                          // ignore: deprecated_member_use
+                          Share.share(message);
                         },
                         icon: const Icon(Icons.notifications_active),
                         label: const Text("Send Reminder"),
