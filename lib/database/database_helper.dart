@@ -28,7 +28,7 @@ class DatabaseHelper {
     return await openDatabase(
       path,
 
-      version: 5,
+      version: 6,
 
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
@@ -59,6 +59,7 @@ receiptPath TEXT
     await _createSettingsTable(db);
     await _createDeletedEntriesTable(db);
     await _createMigrationMetaTable(db);
+    await _createFriendNicknamesTable(db);
   }
 
   Future<void> _upgradeDB(Database db, int oldVersion, int newVersion) async {
@@ -80,6 +81,9 @@ receiptPath TEXT
           'ALTER TABLE deleted_entries ADD COLUMN receiptPath TEXT',
         );
       }
+    }
+    if (oldVersion < 6) {
+      await _createFriendNicknamesTable(db);
     }
   }
 
@@ -358,5 +362,46 @@ value TEXT
       'key': key,
       'value': value,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> _createFriendNicknamesTable(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS friend_nicknames(
+friendName TEXT PRIMARY KEY,
+nickname TEXT
+)
+''');
+  }
+
+  Future<int> saveFriendNickname(String friendName, String nickname) async {
+    final db = await instance.database;
+    return await db.insert('friend_nicknames', {
+      'friendName': friendName.trim().toLowerCase(),
+      'nickname': nickname,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<String?> getFriendNickname(String friendName) async {
+    final db = await instance.database;
+    final result = await db.query(
+      'friend_nicknames',
+      columns: ['nickname'],
+      where: 'friendName = ?',
+      whereArgs: [friendName.trim().toLowerCase()],
+      limit: 1,
+    );
+    if (result.isEmpty) {
+      return null;
+    }
+    return result.first['nickname'] as String?;
+  }
+
+  Future<Map<String, String>> getAllNicknames() async {
+    final db = await instance.database;
+    final result = await db.query('friend_nicknames');
+    return {
+      for (final row in result)
+        (row['friendName'] as String): (row['nickname'] as String)
+    };
   }
 }

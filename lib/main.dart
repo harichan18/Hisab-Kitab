@@ -1253,6 +1253,7 @@ class FriendListItem {
     this.email = '',
     this.friendCode = '',
     this.fromFirestore = false,
+    this.nickname,
   });
 
   final String name;
@@ -1260,6 +1261,14 @@ class FriendListItem {
   final String email;
   final String friendCode;
   final bool fromFirestore;
+  final String? nickname;
+
+  String get displayName {
+    if (nickname != null && nickname!.trim().isNotEmpty) {
+      return nickname!.trim();
+    }
+    return name;
+  }
 }
 
 class FirebaseDataService {
@@ -1978,6 +1987,15 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   List<TransactionModel> transactions = [];
   List<FirestoreFriendProfile> firestoreFriends = [];
+  Map<String, String> localNicknames = {};
+
+  Future<void> loadLocalNicknames() async {
+    final nicks = await DatabaseHelper.instance.getAllNicknames();
+    if (!mounted) return;
+    setState(() {
+      localNicknames = nicks;
+    });
+  }
   double bankBalance = 0.0;
   bool isLoading = false;
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
@@ -2003,6 +2021,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> loadData() async {
+    await loadLocalNicknames();
     if (FirebaseAuth.instance.currentUser == null) {
       await Future.wait([loadTransactions(), loadBankBalance()]);
     } else {
@@ -2082,6 +2101,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> refreshDashboard() async {
+    await loadLocalNicknames();
     if (FirebaseAuth.instance.currentUser == null) {
       await Future.wait([loadTransactions(), loadBankBalance()]);
     } else {
@@ -2324,13 +2344,16 @@ class _HomePageState extends State<HomePage> {
     final existingNames = <String>{};
 
     for (final friendName in uniqueFriends) {
-      items.add(FriendListItem(name: friendName));
-      existingNames.add(friendName.trim().toLowerCase());
+      final key = friendName.trim().toLowerCase();
+      final nickname = localNicknames[key];
+      items.add(FriendListItem(name: friendName, nickname: nickname));
+      existingNames.add(key);
     }
 
     for (final firestoreFriend in firestoreFriends) {
       final displayName = firestoreFriend.displayName;
       final key = displayName.toLowerCase();
+      final nickname = localNicknames[key];
       if (existingNames.contains(key)) {
         final index = items.indexWhere(
           (item) => item.name.trim().toLowerCase() == key,
@@ -2342,6 +2365,7 @@ class _HomePageState extends State<HomePage> {
             email: firestoreFriend.email,
             friendCode: firestoreFriend.friendCode,
             fromFirestore: true,
+            nickname: nickname,
           );
         }
         continue;
@@ -2354,12 +2378,13 @@ class _HomePageState extends State<HomePage> {
           email: firestoreFriend.email,
           friendCode: firestoreFriend.friendCode,
           fromFirestore: true,
+          nickname: nickname,
         ),
       );
       existingNames.add(key);
     }
 
-    items.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    items.sort((a, b) => a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()));
     return items;
   }
 
@@ -2995,8 +3020,8 @@ class _HomePageState extends State<HomePage> {
                                           ? Colors.green.withValues(alpha: 0.2)
                                           : Colors.red.withValues(alpha: 0.2),
                                       child: Text(
-                                        friendName.isNotEmpty
-                                            ? friendName[0].toUpperCase()
+                                        friend.displayName.isNotEmpty
+                                            ? friend.displayName[0].toUpperCase()
                                             : '?',
                                         style: TextStyle(
                                           color: balance >= 0
@@ -3024,8 +3049,8 @@ class _HomePageState extends State<HomePage> {
                                               ? Colors.green.withValues(alpha: 0.2)
                                               : Colors.red.withValues(alpha: 0.2),
                                           child: Text(
-                                            friendName.isNotEmpty
-                                                ? friendName[0].toUpperCase()
+                                            friend.displayName.isNotEmpty
+                                                ? friend.displayName[0].toUpperCase()
                                                 : '?',
                                             style: TextStyle(
                                               color: balance >= 0
@@ -3038,7 +3063,7 @@ class _HomePageState extends State<HomePage> {
                                       },
                                     ),
                               title: Text(
-                                friendName,
+                                friend.displayName,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
@@ -3629,15 +3654,91 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
   StreamSubscription<List<DeletedEntryModel>>? _deletedSubscription;
   Future<String?>? _friendPhotoFuture;
+  String? _localNickname;
 
   @override
   void initState() {
     super.initState();
+    _loadNickname();
     if (FirebaseAuth.instance.currentUser == null) {
       loadPersonTransactions();
     } else {
       startRealtimeSync();
       _friendPhotoFuture = _fetchFriendPhotoUrl();
+    }
+  }
+
+  Future<void> _loadNickname() async {
+    final nick = await DatabaseHelper.instance.getFriendNickname(widget.friendName);
+    if (mounted) {
+      setState(() {
+        _localNickname = nick;
+      });
+    }
+  }
+
+  String get _displayName {
+    if (_localNickname != null && _localNickname!.trim().isNotEmpty) {
+      return _localNickname!.trim();
+    }
+    return widget.friendName;
+  }
+
+  Future<void> _renameFriend() async {
+    final controller = TextEditingController(text: _localNickname ?? '');
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Rename Friend'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Original Name: ${widget.friendName}',
+                style: const TextStyle(color: Colors.grey, fontSize: 14),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                decoration: const InputDecoration(
+                  labelText: 'Nickname',
+                  hintText: 'Enter local nickname',
+                  border: OutlineInputBorder(),
+                ),
+                autofocus: true,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result != null) {
+      await DatabaseHelper.instance.saveFriendNickname(widget.friendName, result);
+      await _loadNickname();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result.isEmpty
+                  ? 'Nickname cleared.'
+                  : 'Nickname updated to "$result".',
+            ),
+          ),
+        );
+      }
     }
   }
 
@@ -4163,16 +4264,22 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.friendName),
+        title: Text(_displayName),
         centerTitle: true,
         actions: [
           PopupMenuButton<String>(
             onSelected: (value) {
-              if (value == 'clear_account') {
+              if (value == 'rename_friend') {
+                _renameFriend();
+              } else if (value == 'clear_account') {
                 _clearAccount();
               }
             },
             itemBuilder: (context) => [
+              const PopupMenuItem<String>(
+                value: 'rename_friend',
+                child: Text('Rename Friend'),
+              ),
               const PopupMenuItem<String>(
                 value: 'clear_account',
                 child: Text('Clear Account'),
@@ -4212,7 +4319,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                               ),
                               const SizedBox(height: 8),
                               Text(
-                                widget.friendName,
+                                _displayName,
                                 style: const TextStyle(
                                   fontSize: 22,
                                   fontWeight: FontWeight.bold,
