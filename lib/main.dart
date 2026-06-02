@@ -870,7 +870,7 @@ class _ProfilePageState extends State<ProfilePage> {
           final friendCode = data['friendCode'] as String? ?? '';
 
           return SafeArea(
-            child: Padding(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.all(24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -997,7 +997,7 @@ class _ProfilePageState extends State<ProfilePage> {
                       ),
                     ],
                   ),
-                  const Spacer(),
+                  const SizedBox(height: 48),
                   SizedBox(
                     height: 52,
                     child: ElevatedButton.icon(
