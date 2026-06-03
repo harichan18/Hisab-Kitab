@@ -28,7 +28,7 @@ class DatabaseHelper {
     return await openDatabase(
       path,
 
-      version: 6,
+      version: 7,
 
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
@@ -60,6 +60,7 @@ receiptPath TEXT
     await _createDeletedEntriesTable(db);
     await _createMigrationMetaTable(db);
     await _createFriendNicknamesTable(db);
+    await _createCachedFriendsTable(db);
   }
 
   Future<void> _upgradeDB(Database db, int oldVersion, int newVersion) async {
@@ -84,6 +85,9 @@ receiptPath TEXT
     }
     if (oldVersion < 6) {
       await _createFriendNicknamesTable(db);
+    }
+    if (oldVersion < 7) {
+      await _createCachedFriendsTable(db);
     }
   }
 
@@ -403,5 +407,73 @@ nickname TEXT
       for (final row in result)
         (row['friendName'] as String): (row['nickname'] as String)
     };
+  }
+
+  Future<void> _createCachedFriendsTable(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS cached_friends(
+  friendUid TEXT PRIMARY KEY,
+  friendName TEXT,
+  email TEXT,
+  friendCode TEXT,
+  photoUrl TEXT,
+  upiId TEXT,
+  mobileNumber TEXT
+)
+''');
+  }
+
+  Future<void> saveCachedFriend({
+    required String friendUid,
+    required String friendName,
+    String? email,
+    String? friendCode,
+    String? photoUrl,
+    String? upiId,
+    String? mobileNumber,
+  }) async {
+    final db = await instance.database;
+    await db.insert('cached_friends', {
+      'friendUid': friendUid,
+      'friendName': friendName,
+      'email': email ?? '',
+      'friendCode': friendCode ?? '',
+      'photoUrl': photoUrl ?? '',
+      'upiId': upiId ?? '',
+      'mobileNumber': mobileNumber ?? '',
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<Map<String, dynamic>?> getCachedFriendByUid(String friendUid) async {
+    final db = await instance.database;
+    final result = await db.query(
+      'cached_friends',
+      where: 'friendUid = ?',
+      whereArgs: [friendUid],
+      limit: 1,
+    );
+    if (result.isEmpty) {
+      return null;
+    }
+    return result.first;
+  }
+
+  Future<Map<String, dynamic>?> getCachedFriendByName(String friendName) async {
+    final db = await instance.database;
+    final result = await db.query(
+      'cached_friends',
+      where: 'LOWER(TRIM(friendName)) = ?',
+      whereArgs: [friendName.trim().toLowerCase()],
+      limit: 1,
+    );
+    if (result.isEmpty) {
+      return null;
+    }
+    return result.first;
+  }
+
+  Future<List<Map<String, dynamic>>> getAllCachedFriends() async {
+    final db = await instance.database;
+    return await db.query('cached_friends');
   }
 }
