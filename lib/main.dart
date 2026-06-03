@@ -1523,6 +1523,26 @@ class _ProfilePageState extends State<ProfilePage> {
                   SizedBox(
                     height: 52,
                     child: ElevatedButton.icon(
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const SettlementHistoryPage(),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.history),
+                      label: const Text("Settlement History"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueGrey[800],
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    height: 52,
+                    child: ElevatedButton.icon(
                       onPressed: () => _logout(context),
                       icon: const Icon(Icons.logout),
                       label: const Text("Logout"),
@@ -2094,6 +2114,33 @@ class FirebaseDataService {
 
   static DocumentReference<Map<String, dynamic>>? get summaryRef =>
       _userRef?.collection('summary').doc('main');
+
+  static CollectionReference<Map<String, dynamic>>? get settlementsRef =>
+      _userRef?.collection('settlements');
+
+  static Future<void> recordSettlement({
+    required String friendName,
+    required double amount,
+  }) async {
+    final ref = settlementsRef;
+    if (ref == null) return;
+
+    final docRef = ref.doc();
+    final user = _user;
+    final userEmail = user?.email ?? '';
+    final settledBy = _currentUserDisplayName();
+    final createdBy = currentUid ?? '';
+
+    await docRef.set({
+      'settlementId': docRef.id,
+      'friendName': friendName,
+      'amount': amount,
+      'settledBy': settledBy,
+      'settledAt': Timestamp.now(),
+      'createdBy': createdBy,
+      'userEmail': userEmail,
+    });
+  }
 
   static Stream<List<TransactionModel>> transactionsStream() {
     final ref = transactionsRef;
@@ -4666,9 +4713,65 @@ class TransactionDetailPage extends StatelessWidget {
     final receiptWidget = _buildReceiptWidget(context);
     final statusText = isGiven ? 'To Get' : 'To Give';
     final displayFriendName = _transactionDisplayFriendName(transaction);
+    final currentUser = FirebaseAuth.instance.currentUser?.uid;
+    final isCreator = transaction.createdBy == currentUser;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Transaction Details'), centerTitle: true),
+      appBar: AppBar(
+        title: const Text('Transaction Details'),
+        centerTitle: true,
+        actions: [
+          if (isCreator) ...[
+            IconButton(
+              icon: const Icon(Icons.edit),
+              tooltip: 'Edit',
+              onPressed: () async {
+                final result = await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => AddPage(transaction: transaction)),
+                );
+                if (result == true && context.mounted) {
+                  Navigator.pop(context, true);
+                }
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete, color: Colors.red),
+              tooltip: 'Delete',
+              onPressed: () async {
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (dialogContext) => AlertDialog(
+                    title: const Text('Delete Transaction?'),
+                    content: const Text('Are you sure you want to permanently delete this transaction?'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, false),
+                        child: const Text('Cancel'),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, true),
+                        child: const Text('Delete', style: TextStyle(color: Colors.red)),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed == true && context.mounted) {
+                  if (transaction.firebaseId != null) {
+                    await FirebaseDataService.deleteTransaction(transaction);
+                  }
+                  if (transaction.id != null) {
+                    await DatabaseHelper.instance.deleteTransaction(transaction.id!);
+                  }
+                  if (context.mounted) {
+                    Navigator.pop(context, true);
+                  }
+                }
+              },
+            ),
+          ],
+        ],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -4756,7 +4859,7 @@ class PersonDetailPage extends StatefulWidget {
   State<PersonDetailPage> createState() => _PersonDetailPageState();
 }
 
-class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBindingObserver {
+class _PersonDetailPageState extends State<PersonDetailPage> {
   List<TransactionModel> personTransactions = [];
   List<DeletedEntryModel> deletedTransactions = [];
   bool isLoading = true;
@@ -4767,12 +4870,10 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
   String? _cachedUpiId;
   String? _cachedMobileNumber;
   String? _localNickname;
-  bool _launchedUpiPayment = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _loadNickname();
     if (FirebaseAuth.instance.currentUser == null) {
       loadPersonTransactions();
@@ -4917,7 +5018,6 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _transactionsSubscription?.cancel();
     _deletedSubscription?.cancel();
     super.dispose();
@@ -5007,6 +5107,18 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
   }
 
   Future<void> _executeSettleAccount() async {
+    final double amountToSettle = netBalance.abs();
+    if (FirebaseAuth.instance.currentUser != null && amountToSettle != 0) {
+      try {
+        await FirebaseDataService.recordSettlement(
+          friendName: widget.friendName,
+          amount: amountToSettle,
+        );
+      } catch (e) {
+        debugPrint('Error recording settlement: $e');
+      }
+    }
+
     final transactionsToProcess = List<TransactionModel>.from(personTransactions);
 
     for (final t in transactionsToProcess) {
@@ -5056,41 +5168,11 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
     await _executeSettleAccount();
   }
 
-  Future<void> _showUpiSettlementDialog() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Payment Completed?'),
-        content: const Text('Did you successfully complete the UPI payment?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Not Now'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Settle Account'),
-          ),
-        ],
-      ),
-    );
 
-    if (confirmed == true && mounted) {
-      await _executeSettleAccount();
-    }
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _launchedUpiPayment) {
-      _launchedUpiPayment = false;
-      _showUpiSettlementDialog();
-    }
-  }
 
   void _showTransactionOptions(BuildContext context, TransactionModel t) {
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
-    final canEdit = t.createdBy == null || t.createdBy == currentUid;
+    final isCreator = t.createdBy == currentUid;
     showModalBottomSheet(
       context: context,
       builder: (_) {
@@ -5098,7 +5180,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (canEdit)
+              if (isCreator)
                 ListTile(
                   leading: const Icon(Icons.edit),
                   title: const Text("Edit"),
@@ -5130,25 +5212,26 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                   }
                 },
               ),
-              ListTile(
-                leading: const Icon(Icons.delete, color: Colors.red),
-                title: const Text(
-                  "Delete",
-                  style: TextStyle(color: Colors.red),
+              if (isCreator)
+                ListTile(
+                  leading: const Icon(Icons.delete, color: Colors.red),
+                  title: const Text(
+                    "Delete",
+                    style: TextStyle(color: Colors.red),
+                  ),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    if (t.firebaseId != null) {
+                      await FirebaseDataService.deleteTransaction(t);
+                    }
+                    if (t.id != null) {
+                      await DatabaseHelper.instance.deleteTransaction(t.id!);
+                    }
+                    if (FirebaseAuth.instance.currentUser == null) {
+                      loadPersonTransactions();
+                    }
+                  },
                 ),
-                onTap: () async {
-                  Navigator.pop(context);
-                  if (t.firebaseId != null) {
-                    await FirebaseDataService.deleteTransaction(t);
-                  }
-                  if (t.id != null) {
-                    await DatabaseHelper.instance.deleteTransaction(t.id!);
-                  }
-                  if (FirebaseAuth.instance.currentUser == null) {
-                    loadPersonTransactions();
-                  }
-                },
-              ),
             ],
           ),
         );
@@ -5273,13 +5356,18 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
             }) {
               return GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () {
-                  Navigator.push(
+                onTap: () async {
+                  final result = await Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (_) => TransactionDetailPage(transaction: t),
                     ),
                   );
+                  if (result == true &&
+                      FirebaseAuth.instance.currentUser == null &&
+                      context.mounted) {
+                    loadPersonTransactions();
+                  }
                 },
                 onLongPress: () => _showTransactionOptions(context, t),
                 child: Container(
@@ -5462,6 +5550,13 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                 _renameFriend();
               } else if (value == 'clear_account') {
                 _clearAccount();
+              } else if (value == 'settlement_history') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => SettlementHistoryPage(friendName: widget.friendName),
+                  ),
+                );
               }
             },
             itemBuilder: (context) => [
@@ -5472,6 +5567,10 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
               const PopupMenuItem<String>(
                 value: 'clear_account',
                 child: Text('Clear Account'),
+              ),
+              const PopupMenuItem<String>(
+                value: 'settlement_history',
+                child: Text('Settlement History'),
               ),
             ],
           ),
@@ -5617,42 +5716,6 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                         const SizedBox(height: 16),
                         if (netBalance < 0) ...[
                           (() {
-                            if (_friendProfileFuture == null) {
-                              return Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  ElevatedButton.icon(
-                                    onPressed: null,
-                                    icon: const Icon(Icons.payment),
-                                    label: const Text("Pay via UPI"),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.blueAccent,
-                                      foregroundColor: Colors.white,
-                                      minimumSize: const Size(double.infinity, 50),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  const Text(
-                                    "UPI ID: Not available offline",
-                                    style: TextStyle(color: Colors.grey, fontSize: 14),
-                                  ),
-                                ],
-                              );
-                            }
-                            if (snapshot.connectionState == ConnectionState.waiting &&
-                                (upiId == null || upiId.trim().isEmpty)) {
-                              return const Padding(
-                                padding: EdgeInsets.only(top: 8),
-                                child: SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                              );
-                            }
                             final hasUpi = upiId != null && upiId.trim().isNotEmpty;
                             return Column(
                               mainAxisSize: MainAxisSize.min,
@@ -5668,11 +5731,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                               upiUri,
                                               mode: LaunchMode.externalApplication,
                                             );
-                                            if (launched) {
-                                              setState(() {
-                                                _launchedUpiPayment = true;
-                                              });
-                                            } else {
+                                            if (!launched) {
                                               if (context.mounted) {
                                                 ScaffoldMessenger.of(context).showSnackBar(
                                                   const SnackBar(
@@ -5852,6 +5911,206 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                 );
               },
             ),
+    );
+  }
+}
+
+class SettlementHistoryPage extends StatelessWidget {
+  final String? friendName;
+
+  const SettlementHistoryPage({super.key, this.friendName});
+
+  String _formatSettlementDate(DateTime dt) {
+    final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final day = dt.day.toString().padLeft(2, '0');
+    final month = months[dt.month - 1];
+    final year = dt.year;
+    return "$day $month $year";
+  }
+
+  String _formatSettlementTime(DateTime dt) {
+    final hour24 = dt.hour;
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final amPm = hour24 >= 12 ? 'PM' : 'AM';
+    var hour12 = hour24 % 12;
+    if (hour12 == 0) hour12 = 12;
+    return "$hour12:$minute $amPm";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('Settlement History'),
+          centerTitle: true,
+        ),
+        body: const Center(
+          child: Text(
+            'Please log in to view settlement history.',
+            style: TextStyle(color: Colors.grey, fontSize: 16),
+          ),
+        ),
+      );
+    }
+
+    final query = FirebaseFirestore.instance
+        .collection('users')
+        .doc(currentUser.uid)
+        .collection('settlements')
+        .orderBy('settledAt', descending: true);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(friendName != null ? '$friendName Settlements' : 'Settlement History'),
+        centerTitle: true,
+      ),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: query.snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Error loading settlements: ${snapshot.error}',
+                style: const TextStyle(color: Colors.red),
+              ),
+            );
+          }
+
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(
+              child: CircularProgressIndicator(),
+            );
+          }
+
+          final docs = snapshot.data?.docs ?? [];
+          var settlements = docs.map((doc) => doc.data()).toList();
+
+          if (friendName != null) {
+            final filterName = friendName!.trim().toLowerCase();
+            settlements = settlements.where((item) {
+              final itemFriend = (item['friendName'] as String? ?? '').trim().toLowerCase();
+              return itemFriend == filterName;
+            }).toList();
+          }
+
+          if (settlements.isEmpty) {
+            return const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.history, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text(
+                    "No settlements recorded yet.",
+                    style: TextStyle(color: Colors.grey, fontSize: 16),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: settlements.length,
+            itemBuilder: (context, index) {
+              final item = settlements[index];
+              final friend = item['friendName'] as String? ?? 'Unknown';
+              final amount = (item['amount'] as num?)?.toDouble() ?? 0.0;
+              final settledBy = item['settledBy'] as String? ?? '';
+              final settledAtRaw = item['settledAt'];
+              
+              DateTime settledDateTime;
+              if (settledAtRaw is Timestamp) {
+                settledDateTime = settledAtRaw.toDate();
+              } else if (settledAtRaw is String) {
+                settledDateTime = DateTime.tryParse(settledAtRaw) ?? DateTime.now();
+              } else {
+                settledDateTime = DateTime.now();
+              }
+
+              final dateStr = _formatSettlementDate(settledDateTime);
+              final timeStr = _formatSettlementTime(settledDateTime);
+
+              return Card(
+                color: Colors.grey[900],
+                margin: const EdgeInsets.only(bottom: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: BorderSide(color: Colors.grey[850]!),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              friend,
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            "Settled \u20B9${amount.toStringAsFixed(0)}",
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.green,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
+                          const SizedBox(width: 6),
+                          Text(
+                            dateStr,
+                            style: const TextStyle(color: Colors.grey, fontSize: 14),
+                          ),
+                          const SizedBox(width: 16),
+                          const Icon(Icons.access_time, size: 14, color: Colors.grey),
+                          const SizedBox(width: 6),
+                          Text(
+                            timeStr,
+                            style: const TextStyle(color: Colors.grey, fontSize: 14),
+                          ),
+                        ],
+                      ),
+                      if (settledBy.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.blueGrey.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            "Settled by $settledBy",
+                            style: TextStyle(
+                              color: Colors.blue[300],
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
     );
   }
 }
