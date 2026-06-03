@@ -9,12 +9,15 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:dio/dio.dart';
+import 'package:open_file/open_file.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -2629,6 +2632,30 @@ class ReceiptAttachmentSection extends StatelessWidget {
   }
 }
 
+class InstallPermissionService {
+  static const MethodChannel _channel = MethodChannel('hisab_kitab/install_permission');
+
+  static Future<bool> canRequestPackageInstalls() async {
+    try {
+      final bool? result = await _channel.invokeMethod<bool>('canRequestPackageInstalls');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      debugPrint('Error checking canRequestPackageInstalls: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> openInstallPermissionSettings() async {
+    try {
+      final bool? result = await _channel.invokeMethod<bool>('openInstallPermissionSettings');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      debugPrint('Error opening install permission settings: $e');
+      return false;
+    }
+  }
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -2636,7 +2663,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static bool _hasCheckedUpdate = false;
   List<TransactionModel> transactions = [];
   List<FirestoreFriendProfile> firestoreFriends = [];
@@ -2645,6 +2672,8 @@ class _HomePageState extends State<HomePage> {
   DateTime? _lastFriendsSyncTime;
   DateTime? _lastDashboardRefreshTime;
   bool _isSyncingFriends = false;
+  String? _pendingApkPath;
+  bool _isCheckingInstallPermission = false;
 
   Future<void> loadLocalNicknames() async {
     final nicks = await DatabaseHelper.instance.getAllNicknames();
@@ -2665,16 +2694,46 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     initializeHome();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _transactionsSubscription?.cancel();
     _bankBalanceSubscription?.cancel();
     _user1FriendsSubscription?.cancel();
     _user2FriendsSubscription?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (_isCheckingInstallPermission && _pendingApkPath != null) {
+        _isCheckingInstallPermission = false;
+        _handleReturnFromInstallSettings();
+      }
+    }
+  }
+
+  Future<void> _handleReturnFromInstallSettings() async {
+    final hasPermission = await InstallPermissionService.canRequestPackageInstalls();
+    if (!mounted) return;
+
+    if (hasPermission) {
+      final apkPath = _pendingApkPath;
+      _pendingApkPath = null;
+      if (apkPath != null) {
+        await _installApk(apkPath);
+      }
+    } else {
+      _pendingApkPath = null;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Install permission was denied. Cannot install update.')),
+      );
+    }
   }
 
   Future<void> loadData() async {
@@ -2705,6 +2764,202 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _installApk(String apkPath) async {
+    try {
+      final apkFile = File(apkPath);
+      final fileExists = await apkFile.exists();
+      print('APK exists for install: $fileExists');
+      if (!fileExists) {
+        throw Exception('APK file does not exist.');
+      }
+
+      final fileSize = await apkFile.length();
+      print('APK file size: $fileSize bytes');
+      if (fileSize == 0) {
+        throw Exception('APK file is empty.');
+      }
+
+      print('Launching installer: $apkPath');
+      final result = await OpenFile.open(apkPath);
+      print('OpenFile result: ${result.type}');
+      print('OpenFile message: ${result.message}');
+
+      if (result.type != ResultType.done) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Installation failed: ${result.message}')),
+          );
+
+          showDialog(
+            context: context,
+            builder: (errorContext) => AlertDialog(
+              title: const Text('Installation Failed'),
+              content: Text(
+                'Could not launch APK installer.\n\n'
+                'Error: ${result.type}\n'
+                'Details: ${result.message}',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(errorContext),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('APK install exception: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to install update: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _downloadAndInstallApk(String url) async {
+    if (url.isEmpty || url.toLowerCase() == 'pending') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Update URL is not available.')),
+      );
+      return;
+    }
+
+    double progress = 0.0;
+    StateSetter? progressStateSetter;
+    BuildContext? progressDialogContext;
+    bool isProgressDialogClosed = false;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        progressDialogContext = dialogContext;
+        return PopScope(
+          canPop: false,
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              progressStateSetter = setState;
+              return AlertDialog(
+                title: const Text('Downloading Update'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    LinearProgressIndicator(value: progress),
+                    const SizedBox(height: 16),
+                    Text('${(progress * 100).toStringAsFixed(0)}%'),
+                    const SizedBox(height: 8),
+                    const Text('Downloading APK...', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    String apkPath = '';
+    try {
+      print('APK download started');
+      final tempDir = await getTemporaryDirectory();
+      apkPath = '${tempDir.path}/hisab_kitab_update.apk';
+      print('APK saved at: $apkPath');
+
+      final apkFile = File(apkPath);
+      if (await apkFile.exists()) {
+        await apkFile.delete();
+      }
+
+      final dio = Dio();
+      await dio.download(
+        url,
+        apkPath,
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            final currentProgress = received / total;
+            if (progressStateSetter != null) {
+              progressStateSetter!(() {
+                progress = currentProgress;
+              });
+            }
+          }
+        },
+      );
+      print('APK download completed');
+
+      if (progressDialogContext != null && progressDialogContext!.mounted && !isProgressDialogClosed) {
+        isProgressDialogClosed = true;
+        Navigator.pop(progressDialogContext!);
+      }
+
+      final fileExists = await apkFile.exists();
+      print('APK exists: $fileExists');
+      if (!fileExists) {
+        throw Exception('Downloaded APK file does not exist.');
+      }
+
+      final fileSize = await apkFile.length();
+      print('APK file size: $fileSize bytes');
+      if (fileSize == 0) {
+        throw Exception('Downloaded APK file is empty.');
+      }
+
+      final hasPermission = await InstallPermissionService.canRequestPackageInstalls();
+      if (hasPermission) {
+        await _installApk(apkPath);
+      } else {
+        if (mounted) {
+          _pendingApkPath = apkPath;
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (dialogContext) {
+              return AlertDialog(
+                title: const Text('Permission Required'),
+                content: const Text("Please allow 'Install unknown apps' for Hisab Kitab to continue the update."),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(dialogContext);
+                      _pendingApkPath = null;
+                      _isCheckingInstallPermission = false;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Install permission was denied. Cannot install update.')),
+                      );
+                    },
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      Navigator.pop(dialogContext);
+                      _isCheckingInstallPermission = true;
+                      await InstallPermissionService.openInstallPermissionSettings();
+                    },
+                    child: const Text('Settings'),
+                  ),
+                ],
+              );
+            },
+          );
+        }
+      }
+    } catch (e) {
+      if (progressDialogContext != null && progressDialogContext!.mounted && !isProgressDialogClosed) {
+        isProgressDialogClosed = true;
+        Navigator.pop(progressDialogContext!);
+      }
+      print('APK download/install exception: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to download or install update: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _checkAppUpdate() async {
     try {
       final doc = await FirebaseFirestore.instance.collection('app_config').doc('updates').get();
@@ -2714,6 +2969,7 @@ class _HomePageState extends State<HomePage> {
       final versionName = data['versionName'] as String? ?? '';
       final changelog = data['changelog'] as String? ?? '';
       final forceUpdate = data['forceUpdate'] as bool? ?? false;
+      final apkUrl = data['apkUrl'] as String? ?? '';
 
       final packageInfo = await PackageInfo.fromPlatform();
       final currentBuildNumber = int.tryParse(packageInfo.buildNumber) ?? 0;
@@ -2746,11 +3002,7 @@ class _HomePageState extends State<HomePage> {
                   TextButton(
                     onPressed: () {
                       Navigator.pop(dialogContext);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('APK update download will be added in Phase 2'),
-                        ),
-                      );
+                      _downloadAndInstallApk(apkUrl);
                     },
                     child: const Text('Update'),
                   ),
@@ -5408,9 +5660,39 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                 ElevatedButton.icon(
                                   onPressed: hasUpi
                                       ? () async {
-                                          final upiUri = Uri.parse(
-                                            'upi://pay?pa=${upiId.trim()}&pn=${Uri.encodeComponent(_displayName)}&am=${netBalance.abs().toStringAsFixed(2)}&cu=INR',
+                                          final trimmedUpi = upiId.trim();
+                                          final amountToPay = netBalance.abs();
+                                          if (trimmedUpi.isEmpty) {
+                                            if (context.mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                const SnackBar(
+                                                  content: Text('UPI ID must not be empty.'),
+                                                ),
+                                              );
+                                            }
+                                            return;
+                                          }
+                                          if (amountToPay <= 0) {
+                                            if (context.mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                const SnackBar(
+                                                  content: Text('Amount must be greater than 0.'),
+                                                ),
+                                              );
+                                            }
+                                            return;
+                                          }
+                                          final upiUri = Uri(
+                                            scheme: 'upi',
+                                            host: 'pay',
+                                            queryParameters: {
+                                              'pa': upiId.trim(),
+                                              'pn': _displayName,
+                                              'am': netBalance.abs().toStringAsFixed(2),
+                                              'cu': 'INR',
+                                            },
                                           );
+                                          debugPrint('UPI URI: $upiUri');
                                           try {
                                             final launched = await launchUrl(
                                               upiUri,
