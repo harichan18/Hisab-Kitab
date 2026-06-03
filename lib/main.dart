@@ -113,6 +113,116 @@ Future<void> _deleteLocalReceipt(String? receiptPath, {required String scope}) a
   }
 }
 
+class CustomCacheManager {
+  static final CustomCacheManager instance = CustomCacheManager._();
+  CustomCacheManager._();
+
+  String _generateKey(String input) {
+    int hash = 5381;
+    for (int i = 0; i < input.length; i++) {
+      hash = ((hash << 5) + hash) + input.codeUnitAt(i);
+    }
+    return hash.abs().toString();
+  }
+
+  Future<File?> getFile(String url) async {
+    try {
+      if (url.isEmpty) return null;
+      final cacheDir = await getTemporaryDirectory();
+      final key = _generateKey(url);
+      final file = File('${cacheDir.path}/$key');
+      if (await file.exists()) {
+        return file;
+      }
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        await file.writeAsBytes(response.bodyBytes);
+        return file;
+      }
+    } catch (e) {
+      debugPrint('Error caching image $url: $e');
+    }
+    return null;
+  }
+}
+
+class CustomCachedImage extends StatefulWidget {
+  final String url;
+  final double? width;
+  final double? height;
+  final BoxFit fit;
+  final Widget Function(BuildContext, Object, StackTrace?)? errorBuilder;
+
+  const CustomCachedImage({
+    super.key,
+    required this.url,
+    this.width,
+    this.height,
+    this.fit = BoxFit.cover,
+    this.errorBuilder,
+  });
+
+  @override
+  State<CustomCachedImage> createState() => _CustomCachedImageState();
+}
+
+class _CustomCachedImageState extends State<CustomCachedImage> {
+  File? _localFile;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadImage();
+  }
+
+  @override
+  void didUpdateWidget(CustomCachedImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) {
+      _loadImage();
+    }
+  }
+
+  Future<void> _loadImage() async {
+    if (mounted) setState(() => _isLoading = true);
+    final file = await CustomCacheManager.instance.getFile(widget.url);
+    if (mounted) {
+      setState(() {
+        _localFile = file;
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_localFile != null) {
+      return Image.file(
+        _localFile!,
+        width: widget.width,
+        height: widget.height,
+        fit: widget.fit,
+        errorBuilder: widget.errorBuilder,
+      );
+    }
+    if (_isLoading) {
+      return SizedBox(
+        width: widget.width,
+        height: widget.height,
+        child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    return Image.network(
+      widget.url,
+      width: widget.width,
+      height: widget.height,
+      fit: widget.fit,
+      errorBuilder: widget.errorBuilder,
+    );
+  }
+}
+
 String _currentUserDisplayName() {
   final user = FirebaseAuth.instance.currentUser;
   final displayName = user?.displayName?.trim() ?? '';
@@ -1240,12 +1350,17 @@ class _ProfilePageState extends State<ProfilePage> {
                         children: [
                           CircleAvatar(
                             radius: 56,
-                            backgroundImage: photoUrl == null || photoUrl.isEmpty
-                                ? null
-                                : NetworkImage(photoUrl),
+                            backgroundColor: Colors.grey[800],
                             child: photoUrl == null || photoUrl.isEmpty
                                 ? const Icon(Icons.person, size: 56)
-                                : null,
+                                : ClipOval(
+                                    child: CustomCachedImage(
+                                      url: photoUrl,
+                                      width: 112,
+                                      height: 112,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
                           ),
                           Positioned(
                             bottom: 0,
@@ -1655,14 +1770,17 @@ class _AddFriendPageState extends State<AddFriendPage> {
                         ListTile(
                           contentPadding: EdgeInsets.zero,
                           leading: CircleAvatar(
-                            backgroundImage:
-                                photoUrl != null && photoUrl.isNotEmpty
-                                    ? NetworkImage(photoUrl)
-                                    : null,
-                            child:
-                                photoUrl == null || photoUrl.isEmpty
-                                    ? const Icon(Icons.person)
-                                    : null,
+                            backgroundColor: Colors.grey[800],
+                            child: photoUrl == null || photoUrl.isEmpty
+                                ? const Icon(Icons.person)
+                                : ClipOval(
+                                    child: CustomCachedImage(
+                                      url: photoUrl,
+                                      width: 40,
+                                      height: 40,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
                           ),
                           title: Text(
                             name.isEmpty ? "No name" : name,
@@ -1811,6 +1929,14 @@ class FirebaseDataService {
   }
 
   static Future<String?> resolvePeerUserIdByFriendName(String friendName) async {
+    final cached = await DatabaseHelper.instance.getCachedFriendByName(friendName);
+    if (cached != null) {
+      final uid = cached['friendUid'] as String?;
+      if (uid != null && uid.isNotEmpty) {
+        return uid;
+      }
+    }
+
     final uid = currentUid;
     if (uid == null) {
       return null;
@@ -2513,6 +2639,10 @@ class _HomePageState extends State<HomePage> {
   List<TransactionModel> transactions = [];
   List<FirestoreFriendProfile> firestoreFriends = [];
   Map<String, String> localNicknames = {};
+  Map<String, Map<String, dynamic>> cachedFriendProfiles = {};
+  DateTime? _lastFriendsSyncTime;
+  DateTime? _lastDashboardRefreshTime;
+  bool _isSyncingFriends = false;
 
   Future<void> loadLocalNicknames() async {
     final nicks = await DatabaseHelper.instance.getAllNicknames();
@@ -2547,13 +2677,30 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> loadData() async {
     await loadLocalNicknames();
-    if (FirebaseAuth.instance.currentUser == null) {
-      await Future.wait([loadTransactions(), loadBankBalance()]);
-    } else {
-      await FirebaseDataService.migrateSQLiteCacheToFirestoreIfNeeded();
-      await loadFirestoreFriends();
+    await Future.wait([loadTransactions(), loadBankBalance(), loadCachedFriendProfiles()]);
+
+    if (FirebaseAuth.instance.currentUser != null) {
+      _loadDataFirestoreBackground();
     }
     debugPrint('[Home] total friends loaded: ${visibleFriends.length}');
+  }
+
+  Future<void> _loadDataFirestoreBackground() async {
+    await FirebaseDataService.migrateSQLiteCacheToFirestoreIfNeeded();
+    await loadFirestoreFriends();
+  }
+
+  Future<void> loadCachedFriendProfiles() async {
+    final cached = await DatabaseHelper.instance.getAllCachedFriends();
+    final map = {
+      for (final row in cached)
+        (row['friendUid'] as String): row
+    };
+    if (mounted) {
+      setState(() {
+        cachedFriendProfiles = map;
+      });
+    }
   }
 
   Future<void> initializeHome() async {
@@ -2574,11 +2721,29 @@ class _HomePageState extends State<HomePage> {
         if (!mounted) {
           return;
         }
-        setState(() {
-          transactions = data;
-        });
-        debugPrint('[Home] transactions snapshot loaded: ${data.length}');
-        debugPrint('[Home] total friends loaded: ${visibleFriends.length}');
+        bool changed = transactions.length != data.length;
+        if (!changed) {
+          for (int i = 0; i < transactions.length; i++) {
+            if (transactions[i].id != data[i].id ||
+                transactions[i].firebaseId != data[i].firebaseId ||
+                transactions[i].amount != data[i].amount ||
+                transactions[i].note != data[i].note ||
+                transactions[i].date != data[i].date ||
+                transactions[i].iGave != data[i].iGave ||
+                transactions[i].receiptPath != data[i].receiptPath ||
+                transactions[i].receiptUrl != data[i].receiptUrl) {
+              changed = true;
+              break;
+            }
+          }
+        }
+        if (changed) {
+          setState(() {
+            transactions = data;
+          });
+          debugPrint('[Home] transactions snapshot loaded: ${data.length}');
+          debugPrint('[Home] total friends loaded: ${visibleFriends.length}');
+        }
       },
     );
 
@@ -2588,10 +2753,12 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) {
         return;
       }
-      setState(() {
-        bankBalance = amount;
-      });
-      debugPrint('[Home] bank balance snapshot loaded: $amount');
+      if (bankBalance != amount) {
+        setState(() {
+          bankBalance = amount;
+        });
+        debugPrint('[Home] bank balance snapshot loaded: $amount');
+      }
     });
 
     final friendsCollection = FirebaseFirestore.instance.collection('friends');
@@ -2610,9 +2777,26 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) {
       return;
     }
-    setState(() {
-      transactions = data.reversed.toList();
-    });
+    final reversedData = data.reversed.toList();
+    bool changed = transactions.length != reversedData.length;
+    if (!changed) {
+      for (int i = 0; i < transactions.length; i++) {
+        if (transactions[i].id != reversedData[i].id ||
+            transactions[i].amount != reversedData[i].amount ||
+            transactions[i].note != reversedData[i].note ||
+            transactions[i].date != reversedData[i].date ||
+            transactions[i].iGave != reversedData[i].iGave ||
+            transactions[i].receiptPath != reversedData[i].receiptPath) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      setState(() {
+        transactions = reversedData;
+      });
+    }
   }
 
   Future<void> loadBankBalance() async {
@@ -2620,12 +2804,22 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) {
       return;
     }
-    setState(() {
-      bankBalance = amount;
-    });
+    if (bankBalance != amount) {
+      setState(() {
+        bankBalance = amount;
+      });
+    }
   }
 
   Future<void> refreshDashboard() async {
+    final now = DateTime.now();
+    if (_lastDashboardRefreshTime != null &&
+        now.difference(_lastDashboardRefreshTime!) < const Duration(seconds: 1)) {
+      debugPrint('[Home] Dashboard refreshed very recently. Skipping duplicate reload.');
+      return;
+    }
+    _lastDashboardRefreshTime = now;
+
     await loadLocalNicknames();
     if (FirebaseAuth.instance.currentUser == null) {
       await Future.wait([loadTransactions(), loadBankBalance()]);
@@ -2635,79 +2829,156 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> loadFirestoreFriends() async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) {
-      debugPrint('[Home] No current user. Skipping Firestore friends load.');
-      return;
-    }
-
-    final currentUid = currentUser.uid;
-    debugPrint('[Home] current uid: $currentUid');
-
-    final friendsCollection = FirebaseFirestore.instance.collection('friends');
-    final user1Query = await friendsCollection
-        .where('user1', isEqualTo: currentUid)
-        .get();
-    final user2Query = await friendsCollection
-        .where('user2', isEqualTo: currentUid)
-        .get();
-
-    final friendshipDocs = {
-      for (final doc in user1Query.docs) doc.id: doc,
-      for (final doc in user2Query.docs) doc.id: doc,
-    }.values.toList();
-
-    debugPrint('[Home] friendship documents found: ${friendshipDocs.length}');
-
-    final friendUids = <String>{};
-    for (final doc in friendshipDocs) {
-      final data = doc.data();
-      final user1 = data['user1'] as String? ?? '';
-      final user2 = data['user2'] as String? ?? '';
-      final friendUid = user1 == currentUid ? user2 : user1;
-
-      if (friendUid.isNotEmpty && friendUid != currentUid) {
-        friendUids.add(friendUid);
-      }
-    }
-
-    debugPrint('[Home] friend UIDs found: ${friendUids.toList()}');
-
-    final loadedFriends = <FirestoreFriendProfile>[];
-    for (final friendUid in friendUids) {
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(friendUid)
-          .get();
-      final data = userDoc.data();
-
-      if (!userDoc.exists || data == null) {
-        debugPrint('[Home] user missing for friend uid: $friendUid');
-        continue;
-      }
-
-      final friendProfile = FirestoreFriendProfile(
-        uid: data['uid'] as String? ?? friendUid,
-        name: data['name'] as String? ?? '',
-        email: data['email'] as String? ?? '',
-        friendCode: data['friendCode'] as String? ?? '',
+    final cachedRows = await DatabaseHelper.instance.getAllCachedFriends();
+    final cachedFriends = cachedRows.map((row) {
+      return FirestoreFriendProfile(
+        uid: row['friendUid'] as String,
+        name: row['friendName'] as String? ?? '',
+        email: row['email'] as String? ?? '',
+        friendCode: row['friendCode'] as String? ?? '',
       );
-      loadedFriends.add(friendProfile);
-      await FirebaseDataService.saveFriendProfile(friendProfile);
+    }).toList();
+
+    if (cachedFriends.isNotEmpty && mounted) {
+      setState(() {
+        firestoreFriends = cachedFriends;
+      });
     }
 
-    debugPrint(
-      '[Home] users loaded: ${loadedFriends.map((friend) => friend.uid).toList()}',
-    );
-    debugPrint('[Home] Firestore friends loaded: ${loadedFriends.length}');
+    _syncFirestoreFriendsBackground();
+  }
 
-    if (!mounted) {
+  Future<void> _syncFirestoreFriendsBackground() async {
+    if (_isSyncingFriends) {
+      debugPrint('[Home] Already syncing friends. Skipping.');
       return;
     }
 
-    setState(() {
-      firestoreFriends = loadedFriends;
-    });
+    final now = DateTime.now();
+    if (_lastFriendsSyncTime != null &&
+        now.difference(_lastFriendsSyncTime!) < const Duration(seconds: 2)) {
+      debugPrint('[Home] Friends synced very recently. Skipping duplicate reload.');
+      return;
+    }
+    _lastFriendsSyncTime = now;
+    _isSyncingFriends = true;
+
+    try {
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) return;
+      final currentUid = currentUser.uid;
+
+      final friendsCollection = FirebaseFirestore.instance.collection('friends');
+      final user1Query = await friendsCollection
+          .where('user1', isEqualTo: currentUid)
+          .get();
+      final user2Query = await friendsCollection
+          .where('user2', isEqualTo: currentUid)
+          .get();
+
+      final friendshipDocs = {
+        for (final doc in user1Query.docs) doc.id: doc,
+        for (final doc in user2Query.docs) doc.id: doc,
+      }.values.toList();
+
+      final friendUids = <String>{};
+      for (final doc in friendshipDocs) {
+        final data = doc.data();
+        final user1 = data['user1'] as String? ?? '';
+        final user2 = data['user2'] as String? ?? '';
+        final friendUid = user1 == currentUid ? user2 : user1;
+
+        if (friendUid.isNotEmpty && friendUid != currentUid) {
+          friendUids.add(friendUid);
+        }
+      }
+
+      bool cacheChanged = false;
+
+      final tasks = friendUids.map((friendUid) async {
+        final cached = await DatabaseHelper.instance.getCachedFriendByUid(friendUid);
+        try {
+          final userDoc = await FirebaseFirestore.instance
+              .collection('users')
+              .doc(friendUid)
+              .get();
+          final data = userDoc.data();
+          if (userDoc.exists && data != null) {
+            final friendProfile = FirestoreFriendProfile(
+              uid: data['uid'] as String? ?? friendUid,
+              name: data['name'] as String? ?? '',
+              email: data['email'] as String? ?? '',
+              friendCode: data['friendCode'] as String? ?? '',
+            );
+
+            final photoUrl = data['photoUrl'] as String? ?? '';
+            final upiId = data['upiId'] as String? ?? '';
+            final mobileNumber = data['mobileNumber'] as String? ?? '';
+
+            if (cached == null ||
+                cached['friendName'] != friendProfile.name ||
+                cached['email'] != friendProfile.email ||
+                cached['friendCode'] != friendProfile.friendCode ||
+                cached['photoUrl'] != photoUrl ||
+                cached['upiId'] != upiId ||
+                cached['mobileNumber'] != mobileNumber) {
+
+              await DatabaseHelper.instance.saveCachedFriend(
+                friendUid: friendUid,
+                friendName: friendProfile.name,
+                email: friendProfile.email,
+                friendCode: friendProfile.friendCode,
+                photoUrl: photoUrl,
+                upiId: upiId,
+                mobileNumber: mobileNumber,
+              );
+              cacheChanged = true;
+            }
+            return friendProfile;
+          }
+        } catch (e) {
+          debugPrint('Error syncing friend $friendUid: $e');
+        }
+
+        if (cached != null) {
+          return FirestoreFriendProfile(
+            uid: friendUid,
+            name: cached['friendName'] as String? ?? '',
+            email: cached['email'] as String? ?? '',
+            friendCode: cached['friendCode'] as String? ?? '',
+          );
+        }
+        return null;
+      }).toList();
+
+      final results = await Future.wait(tasks);
+      final syncedFriends = results.whereType<FirestoreFriendProfile>().toList();
+
+      if (syncedFriends.isNotEmpty) {
+        if (mounted) {
+          bool listsDifferent = firestoreFriends.length != syncedFriends.length;
+          if (!listsDifferent) {
+            for (int i = 0; i < firestoreFriends.length; i++) {
+              if (firestoreFriends[i].uid != syncedFriends[i].uid ||
+                  firestoreFriends[i].name != syncedFriends[i].name) {
+                listsDifferent = true;
+                break;
+              }
+            }
+          }
+          if (listsDifferent || cacheChanged) {
+            setState(() {
+              firestoreFriends = syncedFriends;
+            });
+            if (cacheChanged) {
+              await loadCachedFriendProfiles();
+            }
+          }
+        }
+      }
+    } finally {
+      _isSyncingFriends = false;
+    }
   }
 
   double get totalToGet {
@@ -3539,54 +3810,39 @@ class _HomePageState extends State<HomePage> {
                           return Card(
                             margin: const EdgeInsets.only(bottom: 12),
                             child: ListTile(
-                              leading: friend.uid == null || friend.uid!.isEmpty
-                                  ? CircleAvatar(
-                                      backgroundColor: balance >= 0
-                                          ? Colors.green.withValues(alpha: 0.2)
-                                          : Colors.red.withValues(alpha: 0.2),
-                                      child: Text(
-                                        friend.displayName.isNotEmpty
-                                            ? friend.displayName[0].toUpperCase()
-                                            : '?',
-                                        style: TextStyle(
-                                          color: balance >= 0
-                                              ? Colors.green
-                                              : Colors.red,
-                                          fontWeight: FontWeight.bold,
-                                        ),
+                              leading: (() {
+                                final cached = cachedFriendProfiles[friend.uid];
+                                final photoUrl = cached?['photoUrl'] as String?;
+                                if (photoUrl != null && photoUrl.isNotEmpty) {
+                                  return CircleAvatar(
+                                    backgroundColor: Colors.transparent,
+                                    child: ClipOval(
+                                      child: CustomCachedImage(
+                                        url: photoUrl,
+                                        width: 40,
+                                        height: 40,
+                                        fit: BoxFit.cover,
                                       ),
-                                    )
-                                  : FutureBuilder<DocumentSnapshot>(
-                                      future: FirebaseFirestore.instance
-                                          .collection('users')
-                                          .doc(friend.uid)
-                                          .get(),
-                                      builder: (context, snapshot) {
-                                        final data = snapshot.data?.data() as Map<String, dynamic>?;
-                                        final photoUrl = data?['photoUrl'] as String?;
-                                        if (photoUrl != null && photoUrl.isNotEmpty) {
-                                          return CircleAvatar(
-                                            backgroundImage: NetworkImage(photoUrl),
-                                          );
-                                        }
-                                        return CircleAvatar(
-                                          backgroundColor: balance >= 0
-                                              ? Colors.green.withValues(alpha: 0.2)
-                                              : Colors.red.withValues(alpha: 0.2),
-                                          child: Text(
-                                            friend.displayName.isNotEmpty
-                                                ? friend.displayName[0].toUpperCase()
-                                                : '?',
-                                            style: TextStyle(
-                                              color: balance >= 0
-                                                  ? Colors.green
-                                                  : Colors.red,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        );
-                                      },
                                     ),
+                                  );
+                                }
+                                return CircleAvatar(
+                                  backgroundColor: balance >= 0
+                                      ? Colors.green.withValues(alpha: 0.2)
+                                      : Colors.red.withValues(alpha: 0.2),
+                                  child: Text(
+                                    friend.displayName.isNotEmpty
+                                        ? friend.displayName[0].toUpperCase()
+                                        : '?',
+                                    style: TextStyle(
+                                      color: balance >= 0
+                                          ? Colors.green
+                                          : Colors.red,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                );
+                              })(),
                               title: Text(
                                 friend.displayName,
                                 maxLines: 1,
@@ -4018,10 +4274,18 @@ class TransactionDetailPage extends StatelessWidget {
                 insetPadding: const EdgeInsets.all(16),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(16),
-                  child: PhotoView(
-                    imageProvider: NetworkImage(receiptUrl),
-                    backgroundDecoration:
-                        const BoxDecoration(color: Colors.black),
+                  child: FutureBuilder<File?>(
+                    future: CustomCacheManager.instance.getFile(receiptUrl),
+                    builder: (context, snapshot) {
+                      final file = snapshot.data;
+                      return PhotoView(
+                        imageProvider: file != null
+                            ? FileImage(file)
+                            : NetworkImage(receiptUrl) as ImageProvider,
+                        backgroundDecoration:
+                            const BoxDecoration(color: Colors.black),
+                      );
+                    },
                   ),
                 ),
               );
@@ -4030,8 +4294,8 @@ class TransactionDetailPage extends StatelessWidget {
         },
         child: ClipRRect(
           borderRadius: BorderRadius.circular(16),
-          child: Image.network(
-            receiptUrl,
+          child: CustomCachedImage(
+            url: receiptUrl,
             fit: BoxFit.cover,
             width: double.infinity,
             errorBuilder: (_, _, _) => const SizedBox(
@@ -4178,9 +4442,10 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
   bool isLoading = true;
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
   StreamSubscription<List<DeletedEntryModel>>? _deletedSubscription;
-  Future<String?>? _friendPhotoFuture;
-  Future<String?>? _friendUpiFuture;
-  Future<String?>? _friendMobileFuture;
+  Future<Map<String, dynamic>?>? _friendProfileFuture;
+  String? _cachedPhotoUrl;
+  String? _cachedUpiId;
+  String? _cachedMobileNumber;
   String? _localNickname;
   bool _launchedUpiPayment = false;
 
@@ -4193,9 +4458,19 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
       loadPersonTransactions();
     } else {
       startRealtimeSync();
-      _friendPhotoFuture = _fetchFriendPhotoUrl();
-      _friendUpiFuture = _fetchFriendUpiId();
-      _friendMobileFuture = _fetchFriendMobileNumber();
+      _loadCachedProfile();
+      _friendProfileFuture = _fetchFriendProfile();
+    }
+  }
+
+  Future<void> _loadCachedProfile() async {
+    final cached = await DatabaseHelper.instance.getCachedFriendByName(widget.friendName);
+    if (cached != null && mounted) {
+      setState(() {
+        _cachedPhotoUrl = cached['photoUrl'] as String?;
+        _cachedUpiId = cached['upiId'] as String?;
+        _cachedMobileNumber = cached['mobileNumber'] as String?;
+      });
     }
   }
 
@@ -4273,7 +4548,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
     }
   }
 
-  Future<String?> _fetchFriendPhotoUrl() async {
+  Future<Map<String, dynamic>?> _fetchFriendProfile() async {
     try {
       String? uid = widget.peerUserId;
       if (uid == null || uid.isEmpty) {
@@ -4287,51 +4562,27 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
           .doc(uid)
           .get();
       final data = userDoc.data();
-      return data?['photoUrl'] as String?;
-    } catch (e) {
-      debugPrint('Error fetching friend photo url: $e');
-      return null;
-    }
-  }
+      if (data != null) {
+        final name = data['name'] as String? ?? widget.friendName;
+        final email = data['email'] as String? ?? '';
+        final friendCode = data['friendCode'] as String? ?? '';
+        final photoUrl = data['photoUrl'] as String? ?? '';
+        final upiId = data['upiId'] as String? ?? '';
+        final mobileNumber = data['mobileNumber'] as String? ?? '';
 
-  Future<String?> _fetchFriendUpiId() async {
-    try {
-      String? uid = widget.peerUserId;
-      if (uid == null || uid.isEmpty) {
-        uid = await FirebaseDataService.resolvePeerUserIdByFriendName(widget.friendName);
+        await DatabaseHelper.instance.saveCachedFriend(
+          friendUid: uid,
+          friendName: name,
+          email: email,
+          friendCode: friendCode,
+          photoUrl: photoUrl,
+          upiId: upiId,
+          mobileNumber: mobileNumber,
+        );
       }
-      if (uid == null || uid.isEmpty) {
-        return null;
-      }
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .get();
-      final data = userDoc.data();
-      return data?['upiId'] as String?;
+      return data;
     } catch (e) {
-      debugPrint('Error fetching friend UPI ID: $e');
-      return null;
-    }
-  }
-
-  Future<String?> _fetchFriendMobileNumber() async {
-    try {
-      String? uid = widget.peerUserId;
-      if (uid == null || uid.isEmpty) {
-        uid = await FirebaseDataService.resolvePeerUserIdByFriendName(widget.friendName);
-      }
-      if (uid == null || uid.isEmpty) {
-        return null;
-      }
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .get();
-      final data = userDoc.data();
-      return data?['mobileNumber'] as String?;
-    } catch (e) {
-      debugPrint('Error fetching friend mobile number: $e');
+      debugPrint('Error fetching friend profile: $e');
       return null;
     }
   }
@@ -4760,8 +5011,8 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                       } else if (t.receiptUrl != null && t.receiptUrl!.isNotEmpty) {
                         return ClipRRect(
                           borderRadius: BorderRadius.circular(8),
-                          child: Image.network(
-                            t.receiptUrl!,
+                          child: CustomCachedImage(
+                            url: t.receiptUrl!,
                             width: 64,
                             height: 48,
                             fit: BoxFit.cover,
@@ -4915,133 +5166,164 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                 style: TextStyle(fontSize: 16, color: Colors.grey),
               ),
             )
-          : Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  if (_friendPhotoFuture != null)
-                    FutureBuilder<String?>(
-                      future: _friendPhotoFuture,
-                      builder: (context, snapshot) {
-                        if (snapshot.connectionState == ConnectionState.done &&
-                            snapshot.hasData &&
-                            snapshot.data != null &&
-                            snapshot.data!.isNotEmpty) {
-                          final photoUrl = snapshot.data!;
-                          return Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              CircleAvatar(
-                                radius: 40,
-                                backgroundImage: NetworkImage(photoUrl),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                _displayName,
-                                style: const TextStyle(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-                            ],
-                          );
-                        }
-                        return const SizedBox.shrink();
-                      },
-                    ),
-                  // Summary Card for this Person
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[900],
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.grey[850]!),
-                    ),
-                    child: Column(
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          : FutureBuilder<Map<String, dynamic>?>(
+              future: _friendProfileFuture,
+              builder: (context, snapshot) {
+                final data = (snapshot.connectionState == ConnectionState.done && snapshot.hasData)
+                    ? snapshot.data
+                    : null;
+                
+                final photoUrl = data?['photoUrl'] as String? ?? _cachedPhotoUrl;
+                final upiId = data?['upiId'] as String? ?? _cachedUpiId;
+                final mobileNumber = data?['mobileNumber'] as String? ?? _cachedMobileNumber;
+
+                return Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      if (photoUrl != null && photoUrl.isNotEmpty) ...[
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  "Given (+)",
-                                  style: TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 14,
-                                  ),
+                            CircleAvatar(
+                              radius: 40,
+                              backgroundColor: Colors.grey[800],
+                              child: ClipOval(
+                                child: CustomCachedImage(
+                                  url: photoUrl,
+                                  width: 80,
+                                  height: 80,
+                                  fit: BoxFit.cover,
                                 ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  "\u20B9${totalGiven.toStringAsFixed(0)}",
-                                  style: const TextStyle(
-                                    color: Colors.green,
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                const Text(
-                                  "Taken (-)",
-                                  style: TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  "\u20B9${totalTaken.toStringAsFixed(0)}",
-                                  style: const TextStyle(
-                                    color: Colors.red,
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        const Divider(height: 24, color: Colors.grey),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text(
-                              "Net Balance",
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
                               ),
                             ),
+                            const SizedBox(height: 8),
                             Text(
-                              "${netBalance >= 0 ? '' : '-'}\u20B9${netBalance.abs().toStringAsFixed(0)}",
-                              style: TextStyle(
-                                color: netBalance >= 0
-                                    ? Colors.green
-                                    : Colors.red,
+                              _displayName,
+                              style: const TextStyle(
                                 fontSize: 22,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
+                            const SizedBox(height: 16),
                           ],
                         ),
                       ],
-                    ),
-                  ),
-                  if (netBalance != 0) ...[
-                    const SizedBox(height: 16),
-                    if (netBalance < 0) ...[
-                      if (_friendUpiFuture != null)
-                        FutureBuilder<String?>(
-                          future: _friendUpiFuture,
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState == ConnectionState.waiting) {
+                      // Summary Card for this Person
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[900],
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.grey[850]!),
+                        ),
+                        child: Column(
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      "Given (+)",
+                                      style: TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      "\u20B9${totalGiven.toStringAsFixed(0)}",
+                                      style: const TextStyle(
+                                        color: Colors.green,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    const Text(
+                                      "Taken (-)",
+                                      style: TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      "\u20B9${totalTaken.toStringAsFixed(0)}",
+                                      style: const TextStyle(
+                                        color: Colors.red,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                            const Divider(height: 24, color: Colors.grey),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  "Net Balance",
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                Text(
+                                  "${netBalance >= 0 ? '' : '-'}\u20B9${netBalance.abs().toStringAsFixed(0)}",
+                                  style: TextStyle(
+                                    color: netBalance >= 0
+                                        ? Colors.green
+                                        : Colors.red,
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (netBalance != 0) ...[
+                        const SizedBox(height: 16),
+                        if (netBalance < 0) ...[
+                          (() {
+                            if (_friendProfileFuture == null) {
+                              return Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ElevatedButton.icon(
+                                    onPressed: null,
+                                    icon: const Icon(Icons.payment),
+                                    label: const Text("Pay via UPI"),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.blueAccent,
+                                      foregroundColor: Colors.white,
+                                      minimumSize: const Size(double.infinity, 50),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    "UPI ID: Not available offline",
+                                    style: TextStyle(color: Colors.grey, fontSize: 14),
+                                  ),
+                                ],
+                              );
+                            }
+                            if (snapshot.connectionState == ConnectionState.waiting &&
+                                (upiId == null || upiId.trim().isEmpty)) {
                               return const Padding(
                                 padding: EdgeInsets.only(top: 8),
                                 child: SizedBox(
@@ -5051,7 +5333,6 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                 ),
                               );
                             }
-                            final upiId = snapshot.data;
                             final hasUpi = upiId != null && upiId.trim().isNotEmpty;
                             return Column(
                               mainAxisSize: MainAxisSize.min,
@@ -5115,38 +5396,34 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                 ),
                               ],
                             );
-                          },
-                        )
-                      else
-                        Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            ElevatedButton.icon(
-                              onPressed: null,
-                              icon: const Icon(Icons.payment),
-                              label: const Text("Pay via UPI"),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.blueAccent,
-                                foregroundColor: Colors.white,
-                                minimumSize: const Size(double.infinity, 50),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
+                          })(),
+                        ] else if (netBalance > 0) ...[
+                          (() {
+                            if (_friendProfileFuture == null) {
+                              return ElevatedButton.icon(
+                                onPressed: () {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text("Friend has not added a mobile number."),
+                                      ),
+                                    );
+                                  }
+                                },
+                                icon: const Icon(Icons.notifications_active),
+                                label: const Text("Send Reminder"),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.orangeAccent,
+                                  foregroundColor: Colors.white,
+                                  minimumSize: const Size(double.infinity, 50),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
                                 ),
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              "UPI ID: Not available offline",
-                              style: TextStyle(color: Colors.grey, fontSize: 14),
-                            ),
-                          ],
-                        ),
-                    ] else if (netBalance > 0) ...[
-                      if (_friendMobileFuture != null)
-                        FutureBuilder<String?>(
-                          future: _friendMobileFuture,
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState == ConnectionState.waiting) {
+                              );
+                            }
+                            if (snapshot.connectionState == ConnectionState.waiting &&
+                                (mobileNumber == null || mobileNumber.trim().isEmpty)) {
                               return const Padding(
                                 padding: EdgeInsets.only(top: 8),
                                 child: SizedBox(
@@ -5156,7 +5433,6 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                 ),
                               );
                             }
-                            final mobileNumber = snapshot.data;
                             return ElevatedButton.icon(
                               onPressed: () async {
                                 if (mobileNumber == null || mobileNumber.trim().isEmpty) {
@@ -5227,55 +5503,34 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                 ),
                               ),
                             );
-                          },
-                        )
-                      else
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text("Friend has not added a mobile number."),
+                          })(),
+                        ],
+                      ],
+                      const SizedBox(height: 20),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                "Transaction History",
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
                                 ),
-                              );
-                            }
-                          },
-                          icon: const Icon(Icons.notifications_active),
-                          label: const Text("Send Reminder"),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.orangeAccent,
-                            foregroundColor: Colors.white,
-                            minimumSize: const Size(double.infinity, 50),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
+                              ),
+                              const SizedBox(height: 10),
+                              _buildTransactionsTable(),
+                              const SizedBox(height: 16),
+                              _buildDeletedTransactionsSection(),
+                            ],
                           ),
                         ),
-                    ],
-                  ],
-                  const SizedBox(height: 20),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            "Transaction History",
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          _buildTransactionsTable(),
-                          const SizedBox(height: 16),
-                          _buildDeletedTransactionsSection(),
-                        ],
                       ),
-                    ),
+                    ],
                   ),
-                ],
-              ),
+                );
+              },
             ),
     );
   }
