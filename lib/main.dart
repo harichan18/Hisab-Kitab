@@ -15,6 +15,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -2636,6 +2637,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  static bool _hasCheckedUpdate = false;
   List<TransactionModel> transactions = [];
   List<FirestoreFriendProfile> firestoreFriends = [];
   Map<String, String> localNicknames = {};
@@ -2703,10 +2705,76 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _checkAppUpdate() async {
+    try {
+      final doc = await FirebaseFirestore.instance.collection('app_config').doc('updates').get();
+      if (!doc.exists || doc.data() == null) return;
+      final data = doc.data()!;
+      final latestVersion = data['latestVersion'] as int? ?? 0;
+      final versionName = data['versionName'] as String? ?? '';
+      final changelog = data['changelog'] as String? ?? '';
+      final forceUpdate = data['forceUpdate'] as bool? ?? false;
+
+      final packageInfo = await PackageInfo.fromPlatform();
+      final currentBuildNumber = int.tryParse(packageInfo.buildNumber) ?? 0;
+
+      if (latestVersion > currentBuildNumber) {
+        if (!mounted) return;
+        showDialog(
+          context: context,
+          barrierDismissible: !forceUpdate,
+          builder: (dialogContext) {
+            return PopScope(
+              canPop: !forceUpdate,
+              child: AlertDialog(
+                title: const Text('Update Available'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Version: $versionName', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 12),
+                    Text(changelog),
+                  ],
+                ),
+                actions: [
+                  if (!forceUpdate)
+                    TextButton(
+                      onPressed: () => Navigator.pop(dialogContext),
+                      child: const Text('Later'),
+                    ),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(dialogContext);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('APK update download will be added in Phase 2'),
+                        ),
+                      );
+                    },
+                    child: const Text('Update'),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      }
+    } catch (e) {
+      debugPrint('Error checking app update: $e');
+    }
+  }
+
   Future<void> initializeHome() async {
     await loadData();
     if (mounted) {
       startRealtimeSync();
+      if (!_hasCheckedUpdate && FirebaseAuth.instance.currentUser != null) {
+        _hasCheckedUpdate = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _checkAppUpdate();
+        });
+      }
     }
   }
 
