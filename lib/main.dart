@@ -5006,100 +5006,6 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
     return totalGiven - totalTaken;
   }
 
-  Future<void> _launchUpi({
-    required String upiId,
-    required bool includeAmount,
-  }) async {
-    // 1. Clean inputs
-    final cleanedUpi = upiId
-        .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '') // Zero-width/invisible chars
-        .trim();
-    final cleanedName = _displayName
-        .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '')
-        .trim();
-    final amountToPay = netBalance.abs();
-
-    // 2. Validate
-    if (cleanedUpi.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('UPI ID must not be empty.')),
-        );
-      }
-      return;
-    }
-    if (includeAmount && amountToPay <= 0) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Amount must be greater than 0.')),
-        );
-      }
-      return;
-    }
-
-    // 3. Log values before launch
-    debugPrint('--- UPI PAYMENT LAUNCH ---');
-    debugPrint('UPI ID (Raw): $upiId');
-    debugPrint('UPI ID (Cleaned): $cleanedUpi');
-    debugPrint('Display Name (Raw): $_displayName');
-    debugPrint('Display Name (Cleaned): $cleanedName');
-    debugPrint('Amount (Raw netBalance): $netBalance');
-    debugPrint('Amount (Parsed): $amountToPay');
-    debugPrint('Mode: ${includeAmount ? "Standard (with amount)" : "Test Mode (without amount)"}');
-
-    // 4. Build URI
-    // For maximum compatibility, we use Uri.parse on a manually constructed string
-    // to prevent the '@' symbol from being percent-encoded to '%40' by Uri's constructor,
-    // which is known to cause validation failures (e.g. "bank limit exceeded") in many UPI apps.
-    // We also make sure parameter values are properly percent-encoded except the '@' in VPA.
-    final String amountParam = includeAmount ? '&am=${amountToPay.toStringAsFixed(2)}' : '';
-    final String uriString = 'upi://pay?pa=$cleanedUpi&pn=${Uri.encodeComponent(cleanedName)}$amountParam&cu=INR';
-    
-    final upiUri = Uri.parse(uriString);
-    debugPrint('Final generated URI: $upiUri');
-    debugPrint('upiUri.toString(): ${upiUri.toString()}');
-    debugPrint('--------------------------');
-
-    // Show a snackbar to inform the user if they are using Test Mode
-    if (!includeAmount && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Launching UPI in Test Mode (without amount). Please enter the amount manually.'),
-          duration: Duration(seconds: 4),
-        ),
-      );
-    }
-
-    // 5. Launch
-    try {
-      final launched = await launchUrl(
-        upiUri,
-        mode: LaunchMode.externalApplication,
-      );
-      if (launched) {
-        setState(() {
-          _launchedUpiPayment = true;
-        });
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No UPI app available to handle this payment.'),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not launch UPI payment: $e'),
-          ),
-        );
-      }
-    }
-  }
-
   Future<void> _executeSettleAccount() async {
     final transactionsToProcess = List<TransactionModel>.from(personTransactions);
 
@@ -5751,21 +5657,39 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                             return Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                 ElevatedButton.icon(
+                                ElevatedButton.icon(
                                   onPressed: hasUpi
                                       ? () async {
-                                          await _launchUpi(
-                                            upiId: upiId,
-                                            includeAmount: true,
+                                          final upiUri = Uri.parse(
+                                            'upi://pay?pa=${upiId.trim()}&pn=${Uri.encodeComponent(_displayName)}&am=${netBalance.abs().toStringAsFixed(2)}&cu=INR',
                                           );
-                                        }
-                                      : null,
-                                  onLongPress: hasUpi
-                                      ? () async {
-                                          await _launchUpi(
-                                            upiId: upiId,
-                                            includeAmount: false,
-                                          );
+                                          try {
+                                            final launched = await launchUrl(
+                                              upiUri,
+                                              mode: LaunchMode.externalApplication,
+                                            );
+                                            if (launched) {
+                                              setState(() {
+                                                _launchedUpiPayment = true;
+                                              });
+                                            } else {
+                                              if (context.mounted) {
+                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                  const SnackBar(
+                                                    content: Text('No UPI app available to handle this payment.'),
+                                                  ),
+                                                );
+                                              }
+                                            }
+                                          } catch (e) {
+                                            if (context.mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(
+                                                  content: Text('Could not launch UPI payment: $e'),
+                                                ),
+                                              );
+                                            }
+                                          }
                                         }
                                       : null,
                                   icon: const Icon(Icons.payment),
@@ -5782,12 +5706,11 @@ class _PersonDetailPageState extends State<PersonDetailPage> with WidgetsBinding
                                 const SizedBox(height: 8),
                                 Text(
                                   hasUpi
-                                      ? "UPI ID: $upiId\n(Long press button to pay without prefilled amount)"
+                                      ? "UPI ID: $upiId"
                                       : "Friend has not added a UPI ID.",
-                                  textAlign: TextAlign.center,
                                   style: const TextStyle(
                                     color: Colors.grey,
-                                    fontSize: 13,
+                                    fontSize: 14,
                                     fontWeight: FontWeight.w500,
                                   ),
                                 ),

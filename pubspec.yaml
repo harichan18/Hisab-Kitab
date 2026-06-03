@@ -50,7 +50,6 @@ dependencies:
   package_info_plus: ^10.1.0
   dio: ^5.9.2
   open_file: ^3.5.11
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
