@@ -256,7 +256,7 @@ flutter doctor
 Clone the repository:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hisab_kitab.git
+git clone https://github.com/harichan18/Hisab-Kitab.git
 ```
 
 Navigate into the project:
