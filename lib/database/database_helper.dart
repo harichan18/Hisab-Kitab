@@ -2,6 +2,7 @@ import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../models/transaction_model.dart';
+import '../models/expense_model.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
@@ -28,7 +29,7 @@ class DatabaseHelper {
     return await openDatabase(
       path,
 
-      version: 7,
+      version: 8,
 
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
@@ -61,6 +62,7 @@ receiptPath TEXT
     await _createMigrationMetaTable(db);
     await _createFriendNicknamesTable(db);
     await _createCachedFriendsTable(db);
+    await _createPersonalExpensesTable(db);
   }
 
   Future<void> _upgradeDB(Database db, int oldVersion, int newVersion) async {
@@ -88,6 +90,9 @@ receiptPath TEXT
     }
     if (oldVersion < 7) {
       await _createCachedFriendsTable(db);
+    }
+    if (oldVersion < 8) {
+      await _createPersonalExpensesTable(db);
     }
   }
 
@@ -475,5 +480,87 @@ CREATE TABLE IF NOT EXISTS cached_friends(
   Future<List<Map<String, dynamic>>> getAllCachedFriends() async {
     final db = await instance.database;
     return await db.query('cached_friends');
+  }
+
+  Future<void> _createPersonalExpensesTable(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS personal_expenses(
+  id TEXT PRIMARY KEY,
+  userId TEXT,
+  amount REAL,
+  category TEXT,
+  description TEXT,
+  expenseDate TEXT,
+  receiptUrl TEXT,
+  createdAt TEXT
+)
+''');
+  }
+
+  Future<int> insertExpense(ExpenseModel expense) async {
+    final db = await instance.database;
+    return await db.insert(
+      'personal_expenses',
+      {
+        'id': expense.id,
+        'userId': expense.userId,
+        'amount': expense.amount,
+        'category': expense.category,
+        'description': expense.description,
+        'expenseDate': expense.expenseDate.toIso8601String(),
+        'receiptUrl': expense.receiptUrl,
+        'createdAt': expense.createdAt.toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<ExpenseModel>> getExpenses(String userId) async {
+    final db = await instance.database;
+    final result = await db.query(
+      'personal_expenses',
+      where: 'userId = ?',
+      whereArgs: [userId],
+      orderBy: 'expenseDate DESC',
+    );
+    return result.map((json) {
+      return ExpenseModel(
+        id: json['id'] as String?,
+        userId: json['userId'] as String? ?? '',
+        amount: (json['amount'] as num?)?.toDouble() ?? 0.0,
+        category: json['category'] as String? ?? 'Other',
+        description: json['description'] as String? ?? '',
+        expenseDate: DateTime.tryParse(json['expenseDate'] as String? ?? '') ?? DateTime.now(),
+        receiptUrl: json['receiptUrl'] as String?,
+        createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
+      );
+    }).toList();
+  }
+
+  Future<int> updateExpense(ExpenseModel expense) async {
+    final db = await instance.database;
+    return await db.update(
+      'personal_expenses',
+      {
+        'userId': expense.userId,
+        'amount': expense.amount,
+        'category': expense.category,
+        'description': expense.description,
+        'expenseDate': expense.expenseDate.toIso8601String(),
+        'receiptUrl': expense.receiptUrl,
+        'createdAt': expense.createdAt.toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [expense.id],
+    );
+  }
+
+  Future<int> deleteExpense(String id) async {
+    final db = await instance.database;
+    return await db.delete(
+      'personal_expenses',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 }

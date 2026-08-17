@@ -4,12 +4,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
@@ -20,11 +20,16 @@ import 'package:dio/dio.dart';
 import 'package:open_file/open_file.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:photo_view/photo_view.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shimmer/shimmer.dart';
 import 'package:url_launcher/url_launcher.dart';
-
 import 'database/database_helper.dart';
 import 'firebase_options.dart';
 import 'models/transaction_model.dart';
+import 'models/expense_model.dart';
+import 'services/expense_service.dart';
+import 'widgets/app_drawer.dart';
+import 'screens/daily_expenditure_screen.dart';
 
 const String _googleServerClientId =
     '614565157950-q0vb676dva84bp5eg102ca1spv6nh0os.apps.googleusercontent.com';
@@ -117,6 +122,60 @@ Future<void> _deleteLocalReceipt(String? receiptPath, {required String scope}) a
   }
 }
 
+String? _getCloudinaryPublicId(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final pathSegments = uri.pathSegments;
+  if (pathSegments.isEmpty) return null;
+
+  final uploadIndex = pathSegments.indexOf('upload');
+  if (uploadIndex == -1 || uploadIndex >= pathSegments.length - 1) {
+    return null;
+  }
+
+  var startIndex = uploadIndex + 1;
+  if (startIndex < pathSegments.length &&
+      pathSegments[startIndex].startsWith('v') &&
+      RegExp(r'^v\d+$').hasMatch(pathSegments[startIndex])) {
+    startIndex++;
+  }
+
+  if (startIndex >= pathSegments.length) return null;
+
+  final remainingPath = pathSegments.sublist(startIndex).join('/');
+  final dotIndex = remainingPath.lastIndexOf('.');
+  if (dotIndex != -1) {
+    return remainingPath.substring(0, dotIndex);
+  }
+  return remainingPath;
+}
+
+Future<void> _deleteFromCloudinary(String url, {required String scope}) async {
+  try {
+    final publicId = _getCloudinaryPublicId(url);
+    if (publicId == null) {
+      _receiptLog(scope, 'Cloudinary delete skipped: unable to extract publicId from $url');
+      return;
+    }
+
+    _receiptLog(scope, 'Attempting to delete Cloudinary asset publicId=$publicId');
+    final uri = Uri.parse('https://api.cloudinary.com/v1_1/dxwf10vjg/image/destroy');
+    final response = await http.post(
+      uri,
+      body: {
+        'public_id': publicId,
+      },
+    );
+
+    _receiptLog(
+      scope,
+      'Cloudinary destroy response: status=${response.statusCode} body=${response.body}',
+    );
+  } catch (e, st) {
+    _receiptLog(scope, 'Cloudinary delete failed: $e\n$st');
+  }
+}
+
 class CustomCacheManager {
   static final CustomCacheManager instance = CustomCacheManager._();
   CustomCacheManager._();
@@ -147,6 +206,29 @@ class CustomCacheManager {
       debugPrint('Error caching image $url: $e');
     }
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AppPrefs — SharedPreferences cache for instant startup reads
+// ---------------------------------------------------------------------------
+class AppPrefs {
+  static SharedPreferences? _prefs;
+
+  static Future<void> init() async {
+    _prefs = await SharedPreferences.getInstance();
+  }
+
+  // Bank balance
+  static double getBankBalance() => _prefs?.getDouble('bank_balance') ?? 0.0;
+  static Future<void> setBankBalance(double value) async {
+    await _prefs?.setDouble('bank_balance', value);
+  }
+
+  // Profile completion
+  static bool isProfileComplete() => _prefs?.getBool('profile_complete') ?? false;
+  static Future<void> setProfileComplete(bool value) async {
+    await _prefs?.setBool('profile_complete', value);
   }
 }
 
@@ -211,10 +293,15 @@ class _CustomCachedImageState extends State<CustomCachedImage> {
       );
     }
     if (_isLoading) {
-      return SizedBox(
-        width: widget.width,
-        height: widget.height,
-        child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      // Shimmer placeholder instead of spinner for a polished loading feel
+      return Shimmer.fromColors(
+        baseColor: Colors.grey[850] ?? const Color(0xFF212121),
+        highlightColor: Colors.grey[700] ?? const Color(0xFF616161),
+        child: Container(
+          width: widget.width ?? 40,
+          height: widget.height ?? 40,
+          color: Colors.grey[850],
+        ),
       );
     }
     return Image.network(
@@ -286,9 +373,33 @@ bool _transactionDisplayIsGiven(TransactionModel transaction) {
   return transaction.iGave;
 }
 
+// ---------------------------------------------------------------------------
+// Smooth page route — 175 ms fade + subtle slide, replaces MaterialPageRoute
+// ---------------------------------------------------------------------------
+PageRouteBuilder<T> _smoothRoute<T>(WidgetBuilder builder) {
+  return PageRouteBuilder<T>(
+    pageBuilder: (context, animation, secondaryAnimation) => builder(context),
+    transitionDuration: const Duration(milliseconds: 175),
+    reverseTransitionDuration: const Duration(milliseconds: 150),
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final fade = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic);
+      final slide = Tween<Offset>(
+        begin: const Offset(0, 0.04),
+        end: Offset.zero,
+      ).animate(fade);
+      return FadeTransition(
+        opacity: fade,
+        child: SlideTransition(position: slide, child: child),
+      );
+    },
+  );
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  // Init SharedPreferences cache before runApp so data is available synchronously
+  await AppPrefs.init();
   runApp(const MyApp());
 }
 
@@ -299,7 +410,22 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(),
+      theme: ThemeData.dark().copyWith(
+        popupMenuTheme: PopupMenuThemeData(
+          color: Colors.grey[900],
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: BorderSide(
+              color: Colors.grey[800]?.withValues(alpha: 0.5) ?? const Color(0x80424242),
+              width: 1,
+            ),
+          ),
+          elevation: 8,
+          shadowColor: Colors.black.withValues(alpha: 0.4),
+          surfaceTintColor: Colors.transparent,
+          menuPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        ),
+      ),
       home: const AuthGate(),
     );
   }
@@ -308,27 +434,33 @@ class MyApp extends StatelessWidget {
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
 
-  Future<bool> _hasValidFirebaseSession(User user) async {
-    try {
-      await user.reload();
-      return FirebaseAuth.instance.currentUser != null;
-    } on FirebaseAuthException catch (e) {
-      final invalidSessionCodes = {
-        'user-not-found',
-        'user-disabled',
-        'invalid-user-token',
-        'user-token-expired',
-      };
-
-      if (invalidSessionCodes.contains(e.code)) {
-        FirebaseDataService.clearCachedSessionData();
-        await GoogleSignIn().signOut();
-        await FirebaseAuth.instance.signOut();
-        return false;
+  // Validates session in the background — does NOT block UI
+  static void _validateSessionBackground(User user) {
+    Future<void>(() async {
+      try {
+        await user.reload();
+        final stillValid = FirebaseAuth.instance.currentUser != null;
+        if (!stillValid) {
+          FirebaseDataService.clearCachedSessionData();
+          await GoogleSignIn().signOut();
+          await FirebaseAuth.instance.signOut();
+        }
+      } on FirebaseAuthException catch (e) {
+        const invalidCodes = {
+          'user-not-found',
+          'user-disabled',
+          'invalid-user-token',
+          'user-token-expired',
+        };
+        if (invalidCodes.contains(e.code)) {
+          FirebaseDataService.clearCachedSessionData();
+          await GoogleSignIn().signOut();
+          await FirebaseAuth.instance.signOut();
+        }
+      } catch (_) {
+        // Network error: keep user signed in, will retry next launch
       }
-
-      rethrow;
-    }
+    });
   }
 
   @override
@@ -336,40 +468,15 @@ class AuthGate extends StatelessWidget {
     return StreamBuilder<User?>(
       stream: FirebaseAuth.instance.authStateChanges(),
       builder: (context, snapshot) {
+        // While stream is initialising show the branded splash — no spinner
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
+          return const SplashScreen();
         }
 
         if (snapshot.hasData) {
-          return FutureBuilder<bool>(
-            future: _hasValidFirebaseSession(snapshot.data!),
-            builder: (context, sessionSnapshot) {
-              if (sessionSnapshot.connectionState == ConnectionState.waiting) {
-                return const Scaffold(
-                  body: Center(child: CircularProgressIndicator()),
-                );
-              }
-
-              if (sessionSnapshot.hasError) {
-                return Scaffold(
-                  body: Center(
-                    child: Text(
-                      "Unable to verify your session. Please try again.",
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                );
-              }
-
-              if (sessionSnapshot.data == true) {
-                return ProfileCompletionGate(child: const SplashScreen());
-              }
-
-              return const LoginPage();
-            },
-          );
+          // Kick off background session check without blocking UI
+          _validateSessionBackground(snapshot.data!);
+          return ProfileCompletionGate(child: const SplashScreen());
         }
 
         return const LoginPage();
@@ -389,35 +496,32 @@ class ProfileCompletionGate extends StatelessWidget {
       return const LoginPage();
     }
 
+    // If cache says profile is complete, show child immediately — no Firestore wait
+    if (AppPrefs.isProfileComplete()) {
+      // Still listen in background to catch profile becoming incomplete
+      _listenProfileCompletionBackground(user.uid);
+      return child;
+    }
+
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: FirebaseFirestore.instance
           .collection('users')
           .doc(user.uid)
           .snapshots(),
       builder: (context, snapshot) {
+        // Show child (SplashScreen) while waiting — no blocking spinner
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(
-              child: CircularProgressIndicator(),
-            ),
-          );
+          return child;
         }
 
         if (snapshot.hasError) {
-          return Scaffold(
-            body: Center(
-              child: Text("Error checking profile: ${snapshot.error}"),
-            ),
-          );
+          // On error, fall through to show child rather than blocking
+          return child;
         }
 
         final data = snapshot.data?.data();
         if (data == null) {
-          return const Scaffold(
-            body: Center(
-              child: CircularProgressIndicator(),
-            ),
-          );
+          return child;
         }
 
         final upiId = data['upiId'] as String? ?? '';
@@ -427,7 +531,15 @@ class ProfileCompletionGate extends StatelessWidget {
         final digitsCount = mobileNumber.replaceAll(RegExp(r'\D'), '').length;
         final isMobileValid = digitsCount >= 10;
 
-        if (upiId.isEmpty || mobileNumber.isEmpty || !isUpiValid || !isMobileValid) {
+        final isComplete = upiId.isNotEmpty &&
+            mobileNumber.isNotEmpty &&
+            isUpiValid &&
+            isMobileValid;
+
+        // Update cache for next launch
+        AppPrefs.setProfileComplete(isComplete);
+
+        if (!isComplete) {
           return CompleteProfilePage(
             currentUpiId: upiId,
             currentMobileNumber: mobileNumber,
@@ -437,6 +549,23 @@ class ProfileCompletionGate extends StatelessWidget {
         return child;
       },
     );
+  }
+
+  static void _listenProfileCompletionBackground(String uid) {
+    FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .snapshots()
+        .take(1)
+        .listen((snap) {
+      final data = snap.data();
+      if (data == null) return;
+      final upiId = data['upiId'] as String? ?? '';
+      final mobile = data['mobileNumber'] as String? ?? '';
+      final isComplete = upiId.contains('@') &&
+          mobile.replaceAll(RegExp(r'\D'), '').length >= 10;
+      AppPrefs.setProfileComplete(isComplete);
+    });
   }
 }
 
@@ -866,7 +995,7 @@ class _LoginPageState extends State<LoginPage> {
       return 'Google Sign-In was cancelled.';
     }
     if (error is FirebaseAuthException && error.message != null) {
-      return error.message!;
+      return error.message ?? 'Authentication failed. Please try again.';
     }
     return 'Google Sign-In failed. Please try again.';
   }
@@ -960,11 +1089,12 @@ class _SplashScreenState extends State<SplashScreen>
   }
 
   Future<void> _navigateToHome() async {
-    await Future.delayed(const Duration(milliseconds: 2000));
+    // 800ms: enough to appreciate the logo, fast enough to feel instant
+    await Future.delayed(const Duration(milliseconds: 800));
     if (mounted) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => const HomePage()),
+        _smoothRoute((_) => const HomePage()),
       );
     }
   }
@@ -1428,6 +1558,47 @@ class _ProfilePageState extends State<ProfilePage> {
                       letterSpacing: 1.5,
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: friendCode));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Friend code copied to clipboard!')),
+                          );
+                        },
+                        icon: const Icon(Icons.copy_rounded, size: 16),
+                        label: const Text("Copy Code"),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.amber,
+                          side: const BorderSide(color: Colors.amber),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          SharePlus.instance.share(
+                            ShareParams(
+                              text: "My Hisab Kitab Friend Code is: $friendCode",
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.share_rounded, size: 16),
+                        label: const Text("Share Code"),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.amber,
+                          side: const BorderSide(color: Colors.amber),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 32),
                   const Text(
                     "UPI ID",
@@ -1520,26 +1691,6 @@ class _ProfilePageState extends State<ProfilePage> {
                     ],
                   ),
                   const SizedBox(height: 48),
-                  SizedBox(
-                    height: 52,
-                    child: ElevatedButton.icon(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const SettlementHistoryPage(),
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.history),
-                      label: const Text("Settlement History"),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blueGrey[800],
-                        foregroundColor: Colors.white,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
                   SizedBox(
                     height: 52,
                     child: ElevatedButton.icon(
@@ -2043,6 +2194,8 @@ class FirebaseDataService {
 
     final ownerData = {
       ...transaction.toFirestoreMap(),
+      'receiptPath': transaction.receiptPath ?? FieldValue.delete(),
+      'receiptUrl': transaction.receiptUrl ?? FieldValue.delete(),
       'firebaseId': firebaseId,
       'peerUserId': resolvedPeerUid,
       'updatedAt': FieldValue.serverTimestamp(),
@@ -2058,6 +2211,8 @@ class FirebaseDataService {
             peerUserId: uid,
           )
           .toFirestoreMap(),
+      'receiptPath': transaction.receiptPath ?? FieldValue.delete(),
+      'receiptUrl': transaction.receiptUrl ?? FieldValue.delete(),
       'firebaseId': firebaseId,
       'peerUserId': uid,
       'updatedAt': FieldValue.serverTimestamp(),
@@ -2192,6 +2347,23 @@ class FirebaseDataService {
                   .toList()
                 ..sort((a, b) => b.clearedDate.compareTo(a.clearedDate)),
         );
+  }
+
+  static Stream<List<DeletedEntryModel>> allDeletedEntriesStream() {
+    final ref = deletedRef;
+    if (ref == null) {
+      return const Stream.empty();
+    }
+    return ref.snapshots().map(
+      (snapshot) =>
+          snapshot.docs
+              .map(
+                (doc) =>
+                    DeletedEntryModel.fromFirestore(doc.id, doc.data()),
+              )
+              .toList()
+            ..sort((a, b) => b.clearedDate.compareTo(a.clearedDate)),
+    );
   }
 
   static Future<String?> saveTransaction(
@@ -2575,99 +2747,149 @@ class ReceiptAttachmentSection extends StatelessWidget {
     required this.receiptUploadProgress,
     required this.onPick,
     required this.onClear,
+    this.existingReceiptPath,
+    this.existingReceiptUrl,
+    this.isReceiptRemoved = false,
+    this.onRemoveExisting,
   });
 
   final XFile? receiptImage;
   final double receiptUploadProgress;
   final void Function(ImageSource source) onPick;
   final VoidCallback onClear;
+  final String? existingReceiptPath;
+  final String? existingReceiptUrl;
+  final bool isReceiptRemoved;
+  final VoidCallback? onRemoveExisting;
+
+  Widget _buildPickButtons() {
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton(
+            onPressed: () => onPick(ImageSource.camera),
+            child: const FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.camera_alt),
+                  SizedBox(width: 8),
+                  Text(
+                    "Camera",
+                    maxLines: 1,
+                    softWrap: false,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: OutlinedButton(
+            onPressed: () => onPick(ImageSource.gallery),
+            child: const FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.photo_library),
+                  SizedBox(width: 8),
+                  Text(
+                    "Gallery",
+                    maxLines: 1,
+                    softWrap: false,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPreview() {
+    if (receiptImage != null) {
+      return SizedBox(
+        height: 140,
+        width: double.infinity,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.file(
+            File(receiptImage!.path),
+            fit: BoxFit.cover,
+          ),
+        ),
+      );
+    } else {
+      final hasLocal = existingReceiptPath != null &&
+          existingReceiptPath!.isNotEmpty &&
+          File(existingReceiptPath!).existsSync();
+      return SizedBox(
+        height: 140,
+        width: double.infinity,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: hasLocal
+              ? Image.file(
+                  File(existingReceiptPath!),
+                  fit: BoxFit.cover,
+                )
+              : CustomCachedImage(
+                  url: existingReceiptUrl!,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) => const Center(
+                    child: Icon(Icons.broken_image, size: 40, color: Colors.grey),
+                  ),
+                ),
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final hasReceipt = receiptImage != null ||
+        (((existingReceiptPath != null && existingReceiptPath!.isNotEmpty) ||
+          (existingReceiptUrl != null && existingReceiptUrl!.isNotEmpty)) &&
+         !isReceiptRemoved);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          "Receipt (optional)",
+          "Receipt",
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: OutlinedButton(
-                onPressed: () => onPick(ImageSource.camera),
-                child: const FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.camera_alt),
-                      SizedBox(width: 8),
-                      Text(
-                        "Camera",
-                        maxLines: 1,
-                        softWrap: false,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: OutlinedButton(
-                onPressed: () => onPick(ImageSource.gallery),
-                child: const FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.photo_library),
-                      SizedBox(width: 8),
-                      Text(
-                        "Gallery",
-                        maxLines: 1,
-                        softWrap: false,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-        if (receiptImage != null) ...[
+        if (hasReceipt) ...[
+          _buildPreview(),
           const SizedBox(height: 12),
-          SizedBox(
-            height: 140,
-            child: Stack(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.file(
-                    File(receiptImage!.path),
-                    fit: BoxFit.cover,
-                    width: double.infinity,
-                  ),
-                ),
-                Positioned(
-                  top: 8,
-                  right: 8,
-                  child: GestureDetector(
-                    onTap: onClear,
-                    child: Container(
-                      decoration: const BoxDecoration(
-                        color: Colors.black54,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.close, color: Colors.white),
-                    ),
-                  ),
-                ),
-              ],
+          _buildPickButtons(),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            key: const ValueKey('remove_receipt_btn'),
+            onPressed: () {
+              if (receiptImage != null) {
+                onClear();
+              } else {
+                onRemoveExisting?.call();
+              }
+            },
+            icon: const Icon(Icons.delete, color: Colors.redAccent),
+            label: const Text(
+              "Remove Receipt",
+              style: TextStyle(color: Colors.redAccent),
+            ),
+            style: OutlinedButton.styleFrom(
+              side: const BorderSide(color: Colors.redAccent),
+              minimumSize: const Size(double.infinity, 44),
             ),
           ),
+        ] else ...[
+          _buildPickButtons(),
         ],
         if (receiptUploadProgress > 0 && receiptUploadProgress < 1)
           Padding(
@@ -2721,6 +2943,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _isSyncingFriends = false;
   String? _pendingApkPath;
   bool _isCheckingInstallPermission = false;
+  String _selectedFilter = 'All';
+  // True while the very first data load is in progress — shows shimmer
+  bool _isInitialLoad = true;
+
+  List<ExpenseModel> _homeExpenses = [];
+  StreamSubscription<List<ExpenseModel>>? _homeExpensesSubscription;
+
+  double get todayHomeSpending {
+    final now = DateTime.now();
+    return _homeExpenses
+        .where((e) => e.expenseDate.year == now.year &&
+                      e.expenseDate.month == now.month &&
+                      e.expenseDate.day == now.day)
+        .fold(0.0, (acc, e) => acc + e.amount);
+  }
+
+  double get monthHomeSpending {
+    final now = DateTime.now();
+    return _homeExpenses
+        .where((e) => e.expenseDate.year == now.year &&
+                      e.expenseDate.month == now.month)
+        .fold(0.0, (acc, e) => acc + e.amount);
+  }
+
+  Future<void> loadExpenses() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'offline_user';
+    final data = await ExpenseService.getExpensesOnce(uid);
+    if (!mounted) return;
+    debugPrint('[Home] [SQLite Load] Reloaded personal expenses: ${data.length} items');
+    setState(() {
+      _homeExpenses = data;
+    });
+  }
 
   Future<void> loadLocalNicknames() async {
     final nicks = await DatabaseHelper.instance.getAllNicknames();
@@ -2729,7 +2984,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       localNicknames = nicks;
     });
   }
-  double bankBalance = 0.0;
+  // Pre-load from cache for instant first render, SQLite will refine shortly after
+  double bankBalance = AppPrefs.getBankBalance();
+  double _oldBankBalance = AppPrefs.getBankBalance();
   bool isLoading = false;
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
   StreamSubscription<double>? _bankBalanceSubscription;
@@ -2752,6 +3009,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _bankBalanceSubscription?.cancel();
     _user1FriendsSubscription?.cancel();
     _user2FriendsSubscription?.cancel();
+    _homeExpensesSubscription?.cancel();
     super.dispose();
   }
 
@@ -2785,7 +3043,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> loadData() async {
     await loadLocalNicknames();
-    await Future.wait([loadTransactions(), loadBankBalance(), loadCachedFriendProfiles()]);
+    await Future.wait([
+      loadTransactions(),
+      loadBankBalance(),
+      loadCachedFriendProfiles(),
+      loadExpenses(),
+    ]);
 
     if (FirebaseAuth.instance.currentUser != null) {
       _loadDataFirestoreBackground();
@@ -3011,7 +3274,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final doc = await FirebaseFirestore.instance.collection('app_config').doc('updates').get();
       if (!doc.exists || doc.data() == null) return;
-      final data = doc.data()!;
+      final data = doc.data() ?? {};
       final latestVersion = data['latestVersion'] as int? ?? 0;
       final versionName = data['versionName'] as String? ?? '';
       final changelog = data['changelog'] as String? ?? '';
@@ -3067,6 +3330,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> initializeHome() async {
     await loadData();
     if (mounted) {
+      setState(() => _isInitialLoad = false); // reveal real content
       startRealtimeSync();
       if (!_hasCheckedUpdate && FirebaseAuth.instance.currentUser != null) {
         _hasCheckedUpdate = true;
@@ -3082,6 +3346,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (currentUser == null) {
       return;
     }
+
+    _homeExpensesSubscription = ExpenseService.expensesStream(currentUser.uid).listen((data) {
+      if (mounted) {
+        setState(() {
+          _homeExpenses = data;
+        });
+      }
+    });
 
     _transactionsSubscription = FirebaseDataService.transactionsStream().listen(
       (data) {
@@ -3108,7 +3380,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           setState(() {
             transactions = data;
           });
-          debugPrint('[Home] transactions snapshot loaded: ${data.length}');
+          debugPrint('[Home] [Firestore Stream] transactions snapshot loaded: ${data.length} items');
           debugPrint('[Home] total friends loaded: ${visibleFriends.length}');
         }
       },
@@ -3122,9 +3394,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       if (bankBalance != amount) {
         setState(() {
+          _oldBankBalance = bankBalance;
           bankBalance = amount;
         });
-        debugPrint('[Home] bank balance snapshot loaded: $amount');
+        debugPrint('[Home] [Firestore Stream] bank balance snapshot loaded: $amount');
       }
     });
 
@@ -3160,6 +3433,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     }
     if (changed) {
+      debugPrint('[Home] [SQLite Load] Overwriting transactions list: ${reversedData.length} items');
       setState(() {
         transactions = reversedData;
       });
@@ -3172,7 +3446,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     if (bankBalance != amount) {
+      debugPrint('[Home] [SQLite Load] Overwriting bankBalance: $amount');
       setState(() {
+        _oldBankBalance = bankBalance;
         bankBalance = amount;
       });
     }
@@ -3400,78 +3676,365 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> showBankBalanceDialog() async {
-    final controller = TextEditingController(
-      text: bankBalance == 0 ? '' : bankBalance.toStringAsFixed(0),
-    );
-    final formKey = GlobalKey<FormState>();
-
-    final saved = await showDialog<bool>(
+    showModalBottomSheet(
       context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text("Enter Bank Balance"),
-          content: Form(
-            key: formKey,
-            child: TextFormField(
-              controller: controller,
-              autofocus: true,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              decoration: const InputDecoration(
-                labelText: "Amount",
-                prefixText: "\u20B9",
-              ),
-              validator: (value) {
-                if (value == null || value.trim().isEmpty) {
-                  return "Please enter bank balance";
-                }
-                if (double.tryParse(value.trim()) == null) {
-                  return "Please enter a valid amount";
-                }
-                return null;
-              },
+      backgroundColor: Colors.grey[950],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (bottomSheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[700],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  "Adjust Bank Balance",
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[900],
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.grey[800]!),
+                  ),
+                  child: Column(
+                    children: [
+                      const Text(
+                        "CURRENT BANK BALANCE",
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.1,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        "₹${formatAmount(bankBalance)}",
+                        style: const TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                OlivePremiumButton(
+                  icon: Icons.add_rounded,
+                  title: "Add Money",
+                  description: "Increase your current bank balance manually",
+                  onTap: () {
+                    Navigator.pop(bottomSheetContext);
+                    _showAdjustmentSheet(isDeduction: false);
+                  },
+                ),
+                const SizedBox(height: 16),
+                OlivePremiumButton(
+                  icon: Icons.remove_rounded,
+                  title: "Deduct Money",
+                  description: "Decrease your current bank balance manually",
+                  onTap: () {
+                    Navigator.pop(bottomSheetContext);
+                    _showAdjustmentSheet(isDeduction: true);
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text("Cancel"),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                if (formKey.currentState?.validate() ?? false) {
-                  final amount = double.parse(controller.text.trim());
-                  await DatabaseHelper.instance.saveBankBalance(amount);
-                  await FirebaseDataService.saveBankBalance(amount);
-                  if (dialogContext.mounted) {
-                    Navigator.pop(dialogContext, true);
-                  }
-                }
-              },
-              child: const Text("Save"),
-            ),
-          ],
         );
       },
     );
+  }
 
-    if (saved == true) {
-      await refreshDashboard();
-    }
+  void _showAdjustmentSheet({required bool isDeduction}) {
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[950],
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sbContext, setSheetState) {
+            final enteredText = controller.text.trim();
+            final enteredAmount = double.tryParse(enteredText) ?? 0.0;
+            final double previewBalance = isDeduction
+                ? (bankBalance - enteredAmount)
+                : (bankBalance + enteredAmount);
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 24,
+                right: 24,
+                top: 16,
+                bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 24,
+              ),
+              child: SafeArea(
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Colors.grey[700],
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Text(
+                        isDeduction ? "Deduct Money" : "Add Money",
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.grey[900],
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.grey[800]!),
+                              ),
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    "Current Balance",
+                                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    "₹${formatAmount(bankBalance)}",
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          const Icon(Icons.arrow_forward_rounded, color: Colors.grey),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: isDeduction && previewBalance < 0
+                                    ? Colors.redAccent.withValues(alpha: 0.1)
+                                    : const Color(0xFF9EA98F).withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isDeduction && previewBalance < 0
+                                      ? Colors.redAccent.withValues(alpha: 0.3)
+                                      : const Color(0xFF9EA98F).withValues(alpha: 0.3),
+                                ),
+                              ),
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    "New Balance Preview",
+                                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    "₹${formatAmount(previewBalance)}",
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: isDeduction && previewBalance < 0
+                                          ? Colors.redAccent
+                                          : const Color(0xFF9EA98F),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      TextFormField(
+                        controller: controller,
+                        autofocus: true,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        style: const TextStyle(color: Colors.white, fontSize: 18),
+                        decoration: InputDecoration(
+                          labelText: "Amount to ${isDeduction ? 'deduct' : 'add'}",
+                          labelStyle: const TextStyle(color: Colors.grey),
+                          prefixText: "\u20B9 ",
+                          prefixStyle: const TextStyle(color: Colors.white, fontSize: 18),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Colors.grey[800]!),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: const BorderSide(color: Color(0xFF9EA98F), width: 2),
+                          ),
+                          errorBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: const BorderSide(color: Colors.redAccent),
+                          ),
+                          focusedErrorBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: const BorderSide(color: Colors.redAccent, width: 2),
+                          ),
+                        ),
+                        onChanged: (_) {
+                          setSheetState(() {});
+                        },
+                        validator: (value) {
+                          if (value == null || value.trim().isEmpty) {
+                            return "Please enter an amount";
+                          }
+                          final parsed = double.tryParse(value.trim());
+                          if (parsed == null || parsed <= 0) {
+                            return "Please enter a valid positive amount";
+                          }
+                          if (isDeduction && bankBalance - parsed < 0) {
+                            return "Deduction amount cannot exceed current balance";
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                side: BorderSide(color: Colors.grey[800]!),
+                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              onPressed: () => Navigator.pop(sheetContext),
+                              child: const Text(
+                                "Cancel",
+                                style: TextStyle(color: Colors.white70, fontSize: 16),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF9EA98F),
+                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              onPressed: () async {
+                                if (formKey.currentState?.validate() ?? false) {
+                                  final amount = double.parse(controller.text.trim());
+                                  final newBalance = isDeduction
+                                      ? (bankBalance - amount)
+                                      : (bankBalance + amount);
+
+                                  await AppPrefs.setBankBalance(newBalance);
+                                  await DatabaseHelper.instance.saveBankBalance(newBalance);
+                                  await FirebaseDataService.saveBankBalance(newBalance);
+
+                                  if (sheetContext.mounted) {
+                                    Navigator.pop(sheetContext);
+                                  }
+
+                                  setState(() {
+                                    _oldBankBalance = bankBalance;
+                                    bankBalance = newBalance;
+                                  });
+
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        backgroundColor: const Color(0xFF9EA98F),
+                                        content: Text(
+                                          isDeduction
+                                              ? "Successfully deducted ₹${formatAmount(amount)} from Bank Balance"
+                                              : "Successfully added ₹${formatAmount(amount)} to Bank Balance",
+                                          style: const TextStyle(
+                                            color: Colors.black,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                }
+                              },
+                              child: Text(
+                                isDeduction ? "Deduct" : "Add",
+                                style: const TextStyle(
+                                  color: Colors.black,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> openProfilePage() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const ProfilePage()),
-    );
+    await Navigator.push(context, _smoothRoute((_) => const ProfilePage()));
   }
 
   Future<void> openAddFriendPage() async {
     final result = await Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const AddFriendPage()),
+      _smoothRoute((_) => const AddFriendPage()),
     );
     if (result == true) {
       await refreshDashboard();
@@ -3490,7 +4053,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!originalNames.containsKey(key)) {
         originalNames[key] = name;
       }
-      map.putIfAbsent(originalNames[key]!, () => []).add(t);
+      map.putIfAbsent(originalNames[key] ?? name, () => []).add(t);
     }
     return map;
   }
@@ -3924,34 +4487,115 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// Shimmer skeleton shown while the first data load is in progress
+  Widget _buildShimmerList() {
+    return ListView.builder(
+      itemCount: 4,
+      physics: const NeverScrollableScrollPhysics(),
+      itemBuilder: (context, _) {
+        return Shimmer.fromColors(
+          baseColor: Colors.grey[850] ?? const Color(0xFF212121),
+          highlightColor: Colors.grey[750] ?? const Color(0xFF424242),
+          child: Card(
+            margin: const EdgeInsets.only(bottom: 12),
+            color: Colors.grey[850],
+            child: ListTile(
+              leading: CircleAvatar(
+                radius: 22,
+                backgroundColor: Colors.grey[800],
+              ),
+              title: Container(
+                height: 14,
+                width: 120,
+                decoration: BoxDecoration(
+                  color: Colors.grey[800],
+                  borderRadius: BorderRadius.circular(6),
+                ),
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 8),
+                  Container(
+                    height: 12,
+                    width: 90,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[800],
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Container(
+                    height: 11,
+                    width: 60,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[800],
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                ],
+              ),
+              isThreeLine: true,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final friends = visibleFriends;
+    final rawFriends = visibleFriends;
+    final List<FriendListItem> friends;
+    if (_selectedFilter == 'Collect') {
+      friends = rawFriends.where((f) => getFriendBalance(f.name) > 0).toList();
+      friends.sort((a, b) => getFriendBalance(b.name).compareTo(getFriendBalance(a.name)));
+    } else if (_selectedFilter == 'Pay') {
+      friends = rawFriends.where((f) => getFriendBalance(f.name) < 0).toList();
+      friends.sort((a, b) => getFriendBalance(a.name).compareTo(getFriendBalance(b.name)));
+    } else if (_selectedFilter == 'Settled') {
+      friends = rawFriends.where((f) => getFriendBalance(f.name) == 0).toList();
+      friends.sort((a, b) => a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()));
+    } else {
+      friends = rawFriends;
+    }
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
-      appBar: AppBar(
-        title: const Text("Hisab Kitab"),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.person),
-            tooltip: "Profile",
-            onPressed: openProfilePage,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(56),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Drawer Menu button
+                Builder(
+                  builder: (context) => IconButton(
+                    icon: const Icon(Icons.menu, size: 24, color: Colors.white),
+                    onPressed: () => Scaffold.of(context).openDrawer(),
+                  ),
+                ),
+                // Add Friend button
+                IconButton(
+                  icon: const Icon(Icons.person_add_rounded, size: 24, color: Colors.white),
+                  onPressed: openAddFriendPage,
+                  tooltip: 'Add Friend',
+                ),
+              ],
+            ),
           ),
-          IconButton(
-            icon: const Icon(Icons.account_balance),
-            tooltip: "Bank Balance",
-            onPressed: showBankBalanceDialog,
-          ),
-        ],
+        ),
       ),
+      drawer: const AppDrawer(currentRoute: 'dashboard'),
       floatingActionButton: FloatingActionButton(
         backgroundColor: Colors.green,
         onPressed: () async {
           final result = await Navigator.push(
             context,
-            MaterialPageRoute(builder: (_) => const AddPage()),
+            _smoothRoute((_) => const AddPage()),
           );
           if (result == true) {
             await refreshDashboard();
@@ -3982,14 +4626,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: Colors.green,
+                          color: Colors.green.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Colors.green.withValues(alpha: 0.3),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.green.withValues(alpha: 0.08),
+                              blurRadius: 8,
+                              spreadRadius: 1,
+                            ),
+                          ],
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              "TO GET",
+                              "COLLECT",
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 color: Colors.white,
@@ -4019,14 +4674,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: Colors.red,
+                          color: Colors.red.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Colors.red.withValues(alpha: 0.3),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.red.withValues(alpha: 0.08),
+                              blurRadius: 8,
+                              spreadRadius: 1,
+                            ),
+                          ],
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              "TO GIVE",
+                              "PAY",
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 color: Colors.white,
@@ -4053,48 +4719,98 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           ],
                         ),
                       ),
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: Colors.blue,
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              "BANK BALANCE",
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
+                      GestureDetector(
+                        onTap: showBankBalanceDialog,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: Colors.blue.withValues(alpha: 0.3),
+                              width: 1.5,
                             ),
-                            const SizedBox(height: 8),
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    "\u20B9${formatAmount(bankBalance)}",
-                                    style: const TextStyle(
-                                      fontSize: 24,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.blue.withValues(alpha: 0.08),
+                                blurRadius: 8,
+                                spreadRadius: 1,
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: const [
+                                  Text(
+                                    "BANK BALANCE",
+                                    style: TextStyle(
                                       fontWeight: FontWeight.bold,
                                       color: Colors.white,
                                     ),
                                   ),
+                                  Icon(
+                                    Icons.edit_outlined,
+                                    size: 14,
+                                    color: Colors.white70,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Expanded(
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    alignment: Alignment.centerLeft,
+                                    child: TweenAnimationBuilder<double>(
+                                      tween: Tween<double>(begin: _oldBankBalance, end: bankBalance),
+                                      duration: const Duration(milliseconds: 600),
+                                      curve: Curves.easeOutCubic,
+                                      builder: (context, value, child) {
+                                        return Text(
+                                          "\u20B9${formatAmount(value)}",
+                                          style: const TextStyle(
+                                            fontSize: 24,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.white,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(height: 2),
+                              const Text(
+                                "Tap to Edit",
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: Colors.amber,
+                          color: Colors.amber.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Colors.amber.withValues(alpha: 0.3),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.amber.withValues(alpha: 0.08),
+                              blurRadius: 8,
+                              spreadRadius: 1,
+                            ),
+                          ],
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4103,7 +4819,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               "NET BALANCE",
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
-                                color: Colors.black,
+                                color: Colors.white,
                               ),
                             ),
                             const SizedBox(height: 8),
@@ -4118,7 +4834,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                     style: const TextStyle(
                                       fontSize: 24,
                                       fontWeight: FontWeight.bold,
-                                      color: Colors.black,
+                                      color: Colors.white,
                                     ),
                                   ),
                                 ),
@@ -4132,34 +4848,163 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 );
               },
             ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: ElevatedButton.icon(
-                onPressed: openAddFriendPage,
-                icon: const Icon(Icons.person_add),
-                label: const Text("Add Friend"),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  foregroundColor: Colors.black,
+            const SizedBox(height: 10),
+            // Personal Spending Card
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.grey[900],
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: Colors.grey[850] ?? const Color(0xFF212121),
+                  width: 1.5,
                 ),
               ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          "PERSONAL SPENDING",
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.amber,
+                            letterSpacing: 1,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  "Today",
+                                  style: TextStyle(color: Colors.grey, fontSize: 11),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  "\u20B9${todayHomeSpending.toStringAsFixed(0)}",
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(width: 24),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  "This Month",
+                                  style: TextStyle(color: Colors.grey, fontSize: 11),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  "\u20B9${monthHomeSpending.toStringAsFixed(0)}",
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const DailyExpenditureScreen(),
+                        ),
+                      ).then((_) => loadExpenses());
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.amber,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          "View Details",
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        ),
+                        Icon(Icons.chevron_right, size: 16),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: ['All', 'Collect', 'Pay', 'Settled'].map((filter) {
+                final isSelected = _selectedFilter == filter;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  child: GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _selectedFilter = filter;
+                      });
+                    },
+                    child: Container(
+                      height: 32,
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      decoration: BoxDecoration(
+                        color: isSelected ? Colors.amber : Colors.grey[900],
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isSelected
+                              ? Colors.amber
+                              : Colors.grey[800]?.withValues(alpha: 0.5) ?? const Color(0x80424242),
+                          width: 1,
+                        ),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        filter,
+                        style: TextStyle(
+                          color: isSelected ? Colors.black : Colors.white70,
+                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
             Expanded(
               child: RefreshIndicator(
                 onRefresh: syncBankBalance,
                 color: Colors.amber,
-                child: friends.isEmpty
+                child: _isInitialLoad
+                    ? _buildShimmerList()
+                    : friends.isEmpty
                     ? ListView(
                         // Wrapping in a ListView so pull-to-refresh works even on empty state
-                        children: const [
-                          SizedBox(height: 80),
+                        children: [
+                          const SizedBox(height: 80),
                           Center(
                             child: Text(
-                              "No friends added yet. Tap '+' to add a transaction.",
-                              style: TextStyle(color: Colors.grey),
+                              _selectedFilter == 'All'
+                                  ? "No friends added yet. Tap '+' to add a transaction."
+                                  : "No friends found under '$_selectedFilter'.",
+                              style: const TextStyle(color: Colors.grey),
                             ),
                           ),
                         ],
@@ -4170,136 +5015,141 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           final friend = friends[index];
                           final friendName = friend.name;
                           final balance = getFriendBalance(friendName);
-                          final status = balance >= 0 ? "To Get" : "To Give";
-                          final statusColor = balance >= 0
-                              ? Colors.green
-                              : Colors.red;
+                          final String status;
+                          final Color statusColor;
+                          if (balance > 0) {
+                            status = "Collect";
+                            statusColor = Colors.green;
+                          } else if (balance < 0) {
+                            status = "Pay";
+                            statusColor = Colors.red;
+                          } else {
+                            status = "Settled";
+                            statusColor = Colors.grey;
+                          }
                           return Card(
                             margin: const EdgeInsets.only(bottom: 12),
-                            child: ListTile(
-                              leading: (() {
-                                final cached = cachedFriendProfiles[friend.uid];
-                                final photoUrl = cached?['photoUrl'] as String?;
-                                if (photoUrl != null && photoUrl.isNotEmpty) {
-                                  return CircleAvatar(
-                                    backgroundColor: Colors.transparent,
-                                    child: ClipOval(
-                                      child: CustomCachedImage(
-                                        url: photoUrl,
-                                        width: 40,
-                                        height: 40,
-                                        fit: BoxFit.cover,
-                                      ),
-                                    ),
-                                  );
-                                }
-                                return CircleAvatar(
-                                  backgroundColor: balance >= 0
-                                      ? Colors.green.withValues(alpha: 0.2)
-                                      : Colors.red.withValues(alpha: 0.2),
-                                  child: Text(
-                                    friend.displayName.isNotEmpty
-                                        ? friend.displayName[0].toUpperCase()
-                                        : '?',
-                                    style: TextStyle(
-                                      color: balance >= 0
-                                          ? Colors.green
-                                          : Colors.red,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: () async {
+                                await Navigator.push(
+                                  context,
+                                  _smoothRoute((_) => PersonDetailPage(
+                                    friendName: friendName,
+                                    peerUserId: friend.uid,
+                                  )),
                                 );
-                              })(),
-                              title: Text(
-                                friend.displayName,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
-                              ),
-                              isThreeLine: true,
-                          subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    alignment: Alignment.centerLeft,
-                                    child: Text(
-                                      "Net Amount: \u20B9${formatAmount(balance.abs())}",
-                                      style: TextStyle(
-                                        color: statusColor,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    "Status: $status",
-                                    style: TextStyle(
-                                      color: statusColor,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              trailing: SizedBox(
-                                width: 96,
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
-                                    IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(
-                                        minWidth: 36,
-                                        minHeight: 36,
-                                      ),
-                                      icon: const Icon(
-                                        Icons.add_circle_outline,
-                                        color: Colors.green,
-                                      ),
-                                      tooltip: "Give Money (+)",
-                                      onPressed: () {
-                                        quickAddTransaction(friendName, true);
-                                      },
-                                    ),
-                                    IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(
-                                        minWidth: 36,
-                                        minHeight: 36,
-                                      ),
-                                      icon: const Icon(
-                                        Icons.remove_circle_outline,
-                                        color: Colors.red,
-                                      ),
-                                      tooltip: "Take Money (-)",
-                                      onPressed: () {
-                                        quickAddTransaction(friendName, false);
-                                      },
-                                    ),
-                                  ],
-                                ),
-                              ),
-                               onTap: () async {
-                                 await Navigator.push(
-                                   context,
-                                   MaterialPageRoute(
-                                     builder: (_) => PersonDetailPage(
-                                       friendName: friendName,
-                                       peerUserId: friend.uid,
-                                     ),
-                                   ),
-                                 );
                                 await refreshDashboard();
                               },
                               onLongPress: () {
                                 deleteEntireFriend(friend);
                               },
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                child: Row(
+                                  children: [
+                                    (() {
+                                      final cached = cachedFriendProfiles[friend.uid];
+                                      final photoUrl = cached?['photoUrl'] as String?;
+                                      if (photoUrl != null && photoUrl.isNotEmpty) {
+                                        return CircleAvatar(
+                                          backgroundColor: Colors.transparent,
+                                          child: ClipOval(
+                                            child: CustomCachedImage(
+                                              url: photoUrl,
+                                              width: 40,
+                                              height: 40,
+                                              fit: BoxFit.cover,
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                      final Color placeholderColor;
+                                      if (balance > 0) {
+                                        placeholderColor = Colors.green;
+                                      } else if (balance < 0) {
+                                        placeholderColor = Colors.red;
+                                      } else {
+                                        placeholderColor = Colors.grey;
+                                      }
+                                      return CircleAvatar(
+                                        backgroundColor: placeholderColor.withValues(alpha: 0.2),
+                                        child: Text(
+                                          friend.displayName.isNotEmpty
+                                              ? friend.displayName[0].toUpperCase()
+                                              : '?',
+                                          style: TextStyle(
+                                            color: placeholderColor,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      );
+                                    })(),
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          Text(
+                                            friend.displayName,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          FittedBox(
+                                            fit: BoxFit.scaleDown,
+                                            alignment: Alignment.centerLeft,
+                                            child: Text(
+                                              "Net Amount: \u20B9${formatAmount(balance.abs())}",
+                                              style: TextStyle(
+                                                color: statusColor,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            "Status: $status",
+                                            style: TextStyle(
+                                              color: statusColor,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        GlassActionButton(
+                                          icon: Icons.add,
+                                          color: Colors.green,
+                                          tooltip: "Give Money (+)",
+                                          onPressed: () {
+                                            quickAddTransaction(friendName, true);
+                                          },
+                                        ),
+                                        const SizedBox(width: 12),
+                                        GlassActionButton(
+                                          icon: Icons.remove,
+                                          color: Colors.red,
+                                          tooltip: "Take Money (-)",
+                                          onPressed: () {
+                                            quickAddTransaction(friendName, false);
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
                           );
                         },
@@ -4331,6 +5181,10 @@ class _AddPageState extends State<AddPage> {
   XFile? receiptImage;
   double receiptUploadProgress = 0;
 
+  String? existingReceiptPath;
+  String? existingReceiptUrl;
+  bool isReceiptRemoved = false;
+
   String formatDate(DateTime date) {
     return "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
   }
@@ -4344,6 +5198,8 @@ class _AddPageState extends State<AddPage> {
       noteController.text = widget.transaction!.note;
       dateController.text = widget.transaction!.date;
       iGave = widget.transaction!.iGave;
+      existingReceiptPath = widget.transaction!.receiptPath;
+      existingReceiptUrl = widget.transaction!.receiptUrl;
     } else {
       dateController.text = formatDate(DateTime.now());
     }
@@ -4368,7 +5224,7 @@ class _AddPageState extends State<AddPage> {
 
   Future<void> saveTransaction() async {
     const scope = 'AddPage.saveTransaction';
-    _receiptLog(scope, 'Save pressed. receiptSelected=${receiptImage != null}');
+    _receiptLog(scope, 'Save pressed. receiptSelected=${receiptImage != null} isReceiptRemoved=$isReceiptRemoved');
     try {
       final currentUser = FirebaseAuth.instance.currentUser;
       _receiptLog(
@@ -4379,6 +5235,21 @@ class _AddPageState extends State<AddPage> {
       String? firebaseId = widget.transaction?.firebaseId;
       String? receiptPath = widget.transaction?.receiptPath;
       String? receiptUrl = widget.transaction?.receiptUrl;
+
+      if (isReceiptRemoved || receiptImage != null) {
+        if (existingReceiptPath != null) {
+          _receiptLog(scope, 'Deleting existing local receipt file: $existingReceiptPath');
+          await _deleteLocalReceipt(existingReceiptPath, scope: scope);
+        }
+        if (existingReceiptUrl != null) {
+          _receiptLog(scope, 'Deleting existing Cloudinary image: $existingReceiptUrl');
+          await _deleteFromCloudinary(existingReceiptUrl!, scope: scope);
+        }
+        if (isReceiptRemoved && receiptImage == null) {
+          receiptPath = null;
+          receiptUrl = null;
+        }
+      }
 
       if (receiptImage != null) {
         if (currentUser == null) {
@@ -4537,6 +5408,15 @@ class _AddPageState extends State<AddPage> {
               ReceiptAttachmentSection(
                 receiptImage: receiptImage,
                 receiptUploadProgress: receiptUploadProgress,
+                existingReceiptPath: existingReceiptPath,
+                existingReceiptUrl: existingReceiptUrl,
+                isReceiptRemoved: isReceiptRemoved,
+                onRemoveExisting: () {
+                  _receiptLog('AddPage.pickReceipt', 'Existing receipt removed.');
+                  setState(() {
+                    isReceiptRemoved = true;
+                  });
+                },
                 onPick: (source) async {
                   final result = await _pickReceiptImage(
                     source: source,
@@ -4547,6 +5427,7 @@ class _AddPageState extends State<AddPage> {
                   }
                   setState(() {
                     receiptImage = result;
+                    isReceiptRemoved = true;
                   });
                 },
                 onClear: () {
@@ -4711,7 +5592,7 @@ class TransactionDetailPage extends StatelessWidget {
     final isGiven = _transactionDisplayIsGiven(transaction);
     final amountColor = isGiven ? Colors.green : Colors.red;
     final receiptWidget = _buildReceiptWidget(context);
-    final statusText = isGiven ? 'To Get' : 'To Give';
+    final statusText = isGiven ? 'Collect' : 'Pay';
     final displayFriendName = _transactionDisplayFriendName(transaction);
     final currentUser = FirebaseAuth.instance.currentUser?.uid;
     final isCreator = transaction.createdBy == currentUser;
@@ -4845,6 +5726,12 @@ class TransactionDetailPage extends StatelessWidget {
   }
 }
 
+class _TransactionGroup {
+  final String dateLabel;
+  final List<TransactionModel> transactions;
+  _TransactionGroup(this.dateLabel, this.transactions);
+}
+
 class PersonDetailPage extends StatefulWidget {
   final String friendName;
   final String? peerUserId;
@@ -4863,6 +5750,30 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   List<TransactionModel> personTransactions = [];
   List<DeletedEntryModel> deletedTransactions = [];
   bool isLoading = true;
+
+  List<_TransactionGroup> _groupTransactions(List<TransactionModel> transactions) {
+    final List<_TransactionGroup> groups = [];
+    String? currentLabel;
+    List<TransactionModel> currentGroupList = [];
+
+    for (final t in transactions) {
+      final label = _formatDateString(t.date);
+      if (currentLabel == null) {
+        currentLabel = label;
+        currentGroupList.add(t);
+      } else if (currentLabel == label) {
+        currentGroupList.add(t);
+      } else {
+        groups.add(_TransactionGroup(currentLabel, currentGroupList));
+        currentLabel = label;
+        currentGroupList = [t];
+      }
+    }
+    if (currentLabel != null) {
+      groups.add(_TransactionGroup(currentLabel, currentGroupList));
+    }
+    return groups;
+  }
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
   StreamSubscription<List<DeletedEntryModel>>? _deletedSubscription;
   Future<Map<String, dynamic>?>? _friendProfileFuture;
@@ -5296,156 +6207,200 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
     );
   }
 
-  Widget _buildTransactionsTable() {
-    if (personTransactions.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 20),
-        child: Text(
-          "No active transactions found.",
-          style: TextStyle(fontSize: 16, color: Colors.grey),
-        ),
-      );
+  String _formatDateString(String rawDate) {
+    final regex = RegExp(r'^(\d{4})-(\d{2})-(\d{2})(.*)$');
+    final match = regex.firstMatch(rawDate.trim());
+    if (match == null) {
+      return rawDate;
+    }
+    final monthStr = match.group(2)!;
+    final dayStr = match.group(3)!;
+    var suffix = match.group(4)!.trim();
+
+    final monthVal = int.tryParse(monthStr);
+    if (monthVal == null || monthVal < 1 || monthVal > 12) {
+      return rawDate;
     }
 
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: DataTable(
-          headingRowColor: WidgetStateProperty.all(Colors.grey[850]),
-          dataRowMinHeight: 48,
-          dataRowMaxHeight: 60,
-          horizontalMargin: 12,
-          columnSpacing: 24,
-          columns: const [
-            DataColumn(
-              label: Text(
-                'Date',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-            DataColumn(
-              label: Text(
-                'Note',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-            DataColumn(
-              label: Text(
-                'Money',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-            DataColumn(
-              label: Text(
-                'Receipt',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-          ],
-          rows: personTransactions.map((t) {
-            final isGiven = _transactionDisplayIsGiven(t);
-            final rowBgColor = isGiven
-                ? Colors.green.withValues(alpha: 0.15)
-                : Colors.red.withValues(alpha: 0.15);
-            final moneyColor = isGiven ? Colors.green : Colors.red;
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    final formattedDate = "$dayStr ${months[monthVal - 1]}";
 
-            Widget buildCell(
-              Widget child, {
-              Alignment alignment = Alignment.centerLeft,
-            }) {
-              return GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () async {
-                  final result = await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => TransactionDetailPage(transaction: t),
-                    ),
-                  );
-                  if (result == true &&
-                      FirebaseAuth.instance.currentUser == null &&
-                      context.mounted) {
-                    loadPersonTransactions();
-                  }
-                },
-                onLongPress: () => _showTransactionOptions(context, t),
-                child: Container(
-                  alignment: alignment,
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: child,
-                ),
-              );
-            }
+    if (suffix.isNotEmpty) {
+      while (suffix.startsWith('-') || suffix.startsWith(':') || suffix.startsWith(' ')) {
+        suffix = suffix.substring(1).trim();
+      }
+      if (suffix.startsWith('(') && suffix.endsWith(')')) {
+        if (suffix.length > 2) {
+          final inside = suffix.substring(1, suffix.length - 1).trim();
+          if (inside.isNotEmpty) {
+            final capitalized = inside[0].toUpperCase() + inside.substring(1);
+            return "$formattedDate ($capitalized)";
+          }
+        }
+        return "$formattedDate $suffix";
+      } else {
+        final capitalized = suffix[0].toUpperCase() + suffix.substring(1);
+        return "$formattedDate ($capitalized)";
+      }
+    }
 
-            return DataRow(
-              color: WidgetStateProperty.all(rowBgColor),
-              cells: [
-                DataCell(buildCell(Text(t.date))),
-                DataCell(buildCell(Text(t.note))),
-                DataCell(
-                  buildCell(
-                    Text(
-                      "\u20B9${t.amount.toStringAsFixed(0)}",
-                      style: TextStyle(
-                        color: moneyColor,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    alignment: Alignment.centerRight,
+    return formattedDate;
+  }
+
+  Widget _buildDateHeader(String formattedDate) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Divider(
+              color: Colors.white24,
+              thickness: 1,
+              endIndent: 12,
+            ),
+          ),
+          Text(
+            formattedDate,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Colors.white70,
+              fontSize: 13,
+            ),
+          ),
+          const Expanded(
+            child: Divider(
+              color: Colors.white24,
+              thickness: 1,
+              indent: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTransactionsTable(List<TransactionModel> transactions) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Table(
+        columnWidths: const {
+          0: FlexColumnWidth(),
+          1: FixedColumnWidth(65),
+          2: FixedColumnWidth(48),
+        },
+        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+        children: transactions.map((t) {
+          final isGiven = _transactionDisplayIsGiven(t);
+          final rowBgColor = isGiven
+              ? Colors.green.withValues(alpha: 0.15)
+              : Colors.red.withValues(alpha: 0.15);
+          final moneyColor = isGiven ? Colors.green : Colors.red;
+
+          Widget buildCell(
+            Widget child, {
+            Alignment alignment = Alignment.centerLeft,
+            EdgeInsetsGeometry padding = const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          }) {
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () async {
+                final result = await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => TransactionDetailPage(transaction: t),
                   ),
-                ),
-                DataCell(
-                  buildCell(
-                    (() {
-                      final hasLocal = t.receiptPath != null &&
-                          t.receiptPath!.isNotEmpty &&
-                          File(t.receiptPath!).existsSync();
-                      if (hasLocal) {
-                        return ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.file(
-                            File(t.receiptPath!),
-                            width: 64,
-                            height: 48,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => const Icon(
-                              Icons.broken_image,
-                              size: 20,
-                              color: Colors.grey,
-                            ),
-                          ),
-                        );
-                      } else if (t.receiptUrl != null && t.receiptUrl!.isNotEmpty) {
-                        return ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: CustomCachedImage(
-                            url: t.receiptUrl!,
-                            width: 64,
-                            height: 48,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => const Icon(
-                              Icons.broken_image,
-                              size: 20,
-                              color: Colors.grey,
-                            ),
-                          ),
-                        );
-                      } else {
-                        return const Icon(
-                          Icons.receipt_long,
-                          size: 20,
-                          color: Colors.grey,
-                        );
-                      }
-                    })(),
-                    alignment: Alignment.center,
-                  ),
-                ),
-              ],
+                );
+                if (result == true &&
+                    FirebaseAuth.instance.currentUser == null &&
+                    context.mounted) {
+                  loadPersonTransactions();
+                }
+              },
+              onLongPress: () => _showTransactionOptions(context, t),
+              child: Container(
+                alignment: alignment,
+                padding: padding,
+                child: child,
+              ),
             );
-          }).toList(),
-        ),
+          }
+
+          return TableRow(
+            decoration: BoxDecoration(
+              color: rowBgColor,
+            ),
+            children: [
+              buildCell(
+                Text(
+                  t.note,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+              buildCell(
+                Text(
+                  "\u20B9${t.amount.toStringAsFixed(0)}",
+                  style: TextStyle(
+                    color: moneyColor,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                alignment: Alignment.centerRight,
+              ),
+              buildCell(
+                (() {
+                  final hasLocal = t.receiptPath != null &&
+                      t.receiptPath!.isNotEmpty &&
+                      File(t.receiptPath!).existsSync();
+                  if (hasLocal) {
+                    return ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: Image.file(
+                        File(t.receiptPath!),
+                        width: 32,
+                        height: 32,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => const Icon(
+                          Icons.broken_image,
+                          size: 18,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    );
+                  } else if (t.receiptUrl != null && t.receiptUrl!.isNotEmpty) {
+                    return ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: CustomCachedImage(
+                        url: t.receiptUrl!,
+                        width: 32,
+                        height: 32,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => const Icon(
+                          Icons.broken_image,
+                          size: 18,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    );
+                  } else {
+                    return const Icon(
+                      Icons.receipt_long,
+                      size: 18,
+                      color: Colors.grey,
+                    );
+                  }
+                })(),
+                alignment: Alignment.center,
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+              ),
+            ],
+          );
+        }).toList(),
       ),
     );
   }
@@ -5470,67 +6425,118 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
             ),
           )
         else
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: DataTable(
-                headingRowColor: WidgetStateProperty.all(Colors.grey[850]),
-                dataRowMinHeight: 48,
-                dataRowMaxHeight: 60,
-                horizontalMargin: 12,
-                columnSpacing: 24,
-                columns: const [
-                  DataColumn(
-                    label: Text(
-                      'Date',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Table(
+              columnWidths: const {
+                0: FixedColumnWidth(80),
+                1: FlexColumnWidth(),
+                2: FixedColumnWidth(65),
+                3: FixedColumnWidth(80),
+              },
+              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+              children: [
+                TableRow(
+                  decoration: BoxDecoration(
+                    color: Colors.grey[850],
                   ),
-                  DataColumn(
-                    label: Text(
-                      'Note',
-                      style: TextStyle(fontWeight: FontWeight.bold),
+                  children: [
+                    Container(
+                      alignment: Alignment.centerLeft,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                      child: const Text(
+                        'Date',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                      ),
                     ),
-                  ),
-                  DataColumn(
-                    label: Text(
-                      'Money',
-                      style: TextStyle(fontWeight: FontWeight.bold),
+                    Container(
+                      alignment: Alignment.centerLeft,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                      child: const Text(
+                        'Note',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                      ),
                     ),
-                  ),
-                  DataColumn(
-                    label: Text(
-                      'Cleared Date',
-                      style: TextStyle(fontWeight: FontWeight.bold),
+                    Container(
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                      child: const Text(
+                        '₹',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                      ),
                     ),
-                  ),
-                ],
-                rows: deletedTransactions.map((entry) {
+                    Container(
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                      child: const Text(
+                        'Cleared',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                      ),
+                    ),
+                  ],
+                ),
+                ...deletedTransactions.map((entry) {
                   final moneyColor = entry.isGiven ? Colors.green : Colors.red;
 
-                  return DataRow(
-                    color: WidgetStateProperty.all(Colors.grey[900]),
-                    cells: [
-                      DataCell(Text(entry.date)),
-                      DataCell(Text(entry.note)),
-                      DataCell(
+                  Widget buildCell(
+                    Widget child, {
+                    Alignment alignment = Alignment.centerLeft,
+                    EdgeInsetsGeometry padding = const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                  }) {
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onLongPress: () {
+                        _showDeletedTransactionOptions(context, entry);
+                      },
+                      child: Container(
+                        alignment: alignment,
+                        padding: padding,
+                        child: child,
+                      ),
+                    );
+                  }
+
+                  return TableRow(
+                    decoration: BoxDecoration(
+                      color: Colors.grey[900],
+                    ),
+                    children: [
+                      buildCell(
+                        Text(
+                          _formatDateString(entry.date),
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      buildCell(
+                        Text(
+                          entry.note,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      buildCell(
                         Text(
                           "\u20B9${entry.amount.toStringAsFixed(0)}",
                           style: TextStyle(
                             color: moneyColor,
                             fontWeight: FontWeight.bold,
+                            fontSize: 13,
                           ),
                         ),
+                        alignment: Alignment.centerRight,
                       ),
-                      DataCell(Text(entry.clearedDate)),
+                      buildCell(
+                        Text(
+                          _formatDateString(entry.clearedDate),
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        alignment: Alignment.centerRight,
+                      ),
                     ],
-                    onLongPress: () {
-                      _showDeletedTransactionOptions(context, entry);
-                    },
                   );
-                }).toList(),
-              ),
+                }),
+              ],
             ),
           ),
       ],
@@ -5560,17 +6566,91 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
               }
             },
             itemBuilder: (context) => [
-              const PopupMenuItem<String>(
+              PopupMenuItem<String>(
                 value: 'rename_friend',
-                child: Text('Rename Friend'),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.edit_outlined, color: Colors.white70),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            'Rename Friend',
+                            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Change display name',
+                            style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right, color: Colors.grey),
+                  ],
+                ),
               ),
-              const PopupMenuItem<String>(
+              const PopupMenuDivider(height: 1),
+              PopupMenuItem<String>(
                 value: 'clear_account',
-                child: Text('Clear Account'),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.cleaning_services_outlined, color: Colors.white70),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            'Clear Account',
+                            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Set balance to zero',
+                            style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right, color: Colors.grey),
+                  ],
+                ),
               ),
-              const PopupMenuItem<String>(
+              const PopupMenuDivider(height: 1),
+              PopupMenuItem<String>(
                 value: 'settlement_history',
-                child: Text('Settlement History'),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.history_outlined, color: Colors.white70),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            'Settlement History',
+                            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'View past settlements',
+                            style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right, color: Colors.grey),
+                  ],
+                ),
               ),
             ],
           ),
@@ -5596,146 +6676,145 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                 final upiId = data?['upiId'] as String? ?? _cachedUpiId;
                 final mobileNumber = data?['mobileNumber'] as String? ?? _cachedMobileNumber;
 
-                return Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      if (photoUrl != null && photoUrl.isNotEmpty) ...[
-                        Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            CircleAvatar(
-                              radius: 40,
-                              backgroundColor: Colors.grey[800],
-                              child: ClipOval(
-                                child: CustomCachedImage(
-                                  url: photoUrl,
-                                  width: 80,
-                                  height: 80,
-                                  fit: BoxFit.cover,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _displayName,
-                              style: const TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                          ],
-                        ),
-                      ],
-                      // Summary Card for this Person
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: Colors.grey[900],
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.grey[850]!),
-                        ),
+                final grouped = _groupTransactions(personTransactions);
+
+                return CustomScrollView(
+                  slivers: [
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                         child: Column(
                           children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Text(
-                                      "Given (+)",
-                                      style: TextStyle(
-                                        color: Colors.grey,
-                                        fontSize: 14,
+                            if (photoUrl != null && photoUrl.isNotEmpty) ...[
+                              Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  CircleAvatar(
+                                    radius: 40,
+                                    backgroundColor: Colors.grey[800],
+                                    child: ClipOval(
+                                      child: CustomCachedImage(
+                                        url: photoUrl,
+                                        width: 80,
+                                        height: 80,
+                                        fit: BoxFit.cover,
                                       ),
                                     ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      "\u20B9${totalGiven.toStringAsFixed(0)}",
-                                      style: const TextStyle(
-                                        color: Colors.green,
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    const Text(
-                                      "Taken (-)",
-                                      style: TextStyle(
-                                        color: Colors.grey,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      "\u20B9${totalTaken.toStringAsFixed(0)}",
-                                      style: const TextStyle(
-                                        color: Colors.red,
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                            const Divider(height: 24, color: Colors.grey),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text(
-                                  "Net Balance",
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
                                   ),
-                                ),
-                                Text(
-                                  "${netBalance >= 0 ? '' : '-'}\u20B9${netBalance.abs().toStringAsFixed(0)}",
-                                  style: TextStyle(
-                                    color: netBalance >= 0
-                                        ? Colors.green
-                                        : Colors.red,
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    _displayName,
+                                    style: const TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.bold,
+                                    ),
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(height: 16),
+                                ],
+                              ),
+                            ],
+                            // Summary Card for this Person
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                color: Colors.grey[900],
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(color: Colors.grey[850] ?? const Color(0xFF212121)),
+                              ),
+                              child: Column(
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          const Text(
+                                            "Given (+)",
+                                            style: TextStyle(
+                                              color: Colors.grey,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            "\u20B9${totalGiven.toStringAsFixed(0)}",
+                                            style: const TextStyle(
+                                              color: Colors.green,
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      Column(
+                                        crossAxisAlignment: CrossAxisAlignment.end,
+                                        children: [
+                                          const Text(
+                                            "Taken (-)",
+                                            style: TextStyle(
+                                              color: Colors.grey,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            "\u20B9${totalTaken.toStringAsFixed(0)}",
+                                            style: const TextStyle(
+                                              color: Colors.red,
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                  const Divider(height: 24, color: Colors.grey),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      const Text(
+                                        "Net Balance",
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      Text(
+                                        "${netBalance >= 0 ? '' : '-'}\u20B9${netBalance.abs().toStringAsFixed(0)}",
+                                        style: TextStyle(
+                                          color: netBalance >= 0
+                                              ? Colors.green
+                                              : Colors.red,
+                                          fontSize: 22,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
-                          ],
-                        ),
-                      ),
-                      if (netBalance != 0) ...[
-                        const SizedBox(height: 16),
-                        if (netBalance < 0) ...[
-                          (() {
-                            final hasUpi = upiId != null && upiId.trim().isNotEmpty;
-                            return Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                ElevatedButton.icon(
-                                  onPressed: hasUpi
-                                      ? () async {
-                                          final upiUri = Uri.parse(
-                                            'upi://pay?pa=${upiId.trim()}&pn=${Uri.encodeComponent(_displayName)}&am=${netBalance.abs().toStringAsFixed(2)}&cu=INR',
-                                          );
+                            if (netBalance != 0) ...[
+                              const SizedBox(height: 16),
+                              if (netBalance < 0) ...[
+                                (() {
+                                  final hasUpi = upiId != null && upiId.trim().isNotEmpty;
+                                  return Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      ElevatedButton.icon(
+                                        onPressed: () async {
+                                          const channel = MethodChannel('hisab_kitab/upi_launcher');
                                           try {
-                                            final launched = await launchUrl(
-                                              upiUri,
-                                              mode: LaunchMode.externalApplication,
-                                            );
-                                            if (!launched) {
+                                            final bool? success = await channel.invokeMethod<bool>('launchUpiPayment');
+                                            if (success != true) {
                                               if (context.mounted) {
                                                 ScaffoldMessenger.of(context).showSnackBar(
                                                   const SnackBar(
-                                                    content: Text('No UPI app available to handle this payment.'),
+                                                    content: Text('No UPI app available.'),
                                                   ),
                                                 );
                                               }
@@ -5744,170 +6823,244 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                             if (context.mounted) {
                                               ScaffoldMessenger.of(context).showSnackBar(
                                                 SnackBar(
-                                                  content: Text('Could not launch UPI payment: $e'),
+                                                  content: Text('Could not open UPI app: $e'),
                                                 ),
                                               );
                                             }
                                           }
+                                        },
+                                        icon: const Icon(Icons.payment),
+                                        label: const Text("Open UPI App"),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.blueAccent,
+                                          foregroundColor: Colors.white,
+                                          minimumSize: const Size(double.infinity, 50),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(12),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      hasUpi
+                                          ? Row(
+                                              mainAxisAlignment: MainAxisAlignment.center,
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  "UPI ID: $upiId",
+                                                  style: const TextStyle(
+                                                    color: Colors.grey,
+                                                    fontSize: 14,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 4),
+                                                GestureDetector(
+                                                  onTap: () async {
+                                                    await Clipboard.setData(
+                                                      ClipboardData(text: upiId.trim()),
+                                                    );
+                                                    if (context.mounted) {
+                                                      ScaffoldMessenger.of(context).showSnackBar(
+                                                        const SnackBar(
+                                                          content: Text('UPI ID copied'),
+                                                          duration: Duration(seconds: 2),
+                                                        ),
+                                                      );
+                                                    }
+                                                  },
+                                                  child: Padding(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                                    child: Icon(
+                                                      Icons.copy_rounded,
+                                                      size: 14,
+                                                      color: Colors.grey[400],
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            )
+                                          : Text(
+                                              _friendProfileFuture == null
+                                                  ? "UPI ID: Not available offline"
+                                                  : (snapshot.connectionState == ConnectionState.waiting
+                                                      ? "Loading UPI ID..."
+                                                      : "Friend has not added a UPI ID."),
+                                              style: const TextStyle(
+                                                color: Colors.grey,
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                    ],
+                                  );
+                                })(),
+                              ] else if (netBalance > 0) ...[
+                                (() {
+                                  if (_friendProfileFuture == null) {
+                                    return ElevatedButton.icon(
+                                      onPressed: () {
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(
+                                              content: Text("Friend has not added a mobile number."),
+                                            ),
+                                          );
                                         }
-                                      : null,
-                                  icon: const Icon(Icons.payment),
-                                  label: const Text("Pay via UPI"),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.blueAccent,
-                                    foregroundColor: Colors.white,
-                                    minimumSize: const Size(double.infinity, 50),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(12),
+                                      },
+                                      icon: const Icon(Icons.notifications_active),
+                                      label: const Text("Send Reminder"),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: Colors.orangeAccent,
+                                        foregroundColor: Colors.white,
+                                        minimumSize: const Size(double.infinity, 50),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                  if (snapshot.connectionState == ConnectionState.waiting &&
+                                      (mobileNumber == null || mobileNumber.trim().isEmpty)) {
+                                    return const Padding(
+                                      padding: EdgeInsets.only(top: 8),
+                                      child: SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      ),
+                                    );
+                                  }
+                                  return ElevatedButton.icon(
+                                    onPressed: () async {
+                                      if (mobileNumber == null || mobileNumber.trim().isEmpty) {
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(
+                                              content: Text("Friend has not added a mobile number."),
+                                            ),
+                                          );
+                                        }
+                                        return;
+                                      }
+
+                                      final normalizedMobile = _normalizePhoneNumber(mobileNumber.trim());
+                                      if (normalizedMobile.isEmpty) {
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(
+                                              content: Text("Friend has not added a mobile number."),
+                                            ),
+                                          );
+                                        }
+                                        return;
+                                      }
+
+                                      final amountText = netBalance.toStringAsFixed(0);
+                                      final message = 'Hi $_displayName,\n\n'
+                                          'According to Hisab Kitab, you currently owe ₹$amountText.\n\n'
+                                          'You can settle it whenever convenient.\n\n'
+                                          'Thanks 🙂';
+
+                                      final whatsappUri = Uri.parse(
+                                        'https://wa.me/$normalizedMobile?text=${Uri.encodeComponent(message)}',
+                                      );
+
+                                      try {
+                                        final launched = await launchUrl(
+                                          whatsappUri,
+                                          mode: LaunchMode.externalApplication,
+                                        );
+                                        if (!launched) {
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(
+                                                content: Text('Could not launch WhatsApp.'),
+                                              ),
+                                            );
+                                          }
+                                        }
+                                      } catch (e) {
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            SnackBar(
+                                              content: Text('Could not launch WhatsApp: $e'),
+                                            ),
+                                          );
+                                        }
+                                      }
+                                    },
+                                    icon: const Icon(Icons.notifications_active),
+                                    label: const Text("Send Reminder"),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.orangeAccent,
+                                      foregroundColor: Colors.white,
+                                      minimumSize: const Size(double.infinity, 50),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
                                     ),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
+                                  );
+                                })(),
+                              ],
+                            ],
+                            const SizedBox(height: 20),
+                            Row(
+                              children: const [
                                 Text(
-                                  hasUpi
-                                      ? "UPI ID: $upiId"
-                                      : "Friend has not added a UPI ID.",
-                                  style: const TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w500,
+                                  "Transaction History",
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
                                   ),
                                 ),
                               ],
-                            );
-                          })(),
-                        ] else if (netBalance > 0) ...[
-                          (() {
-                            if (_friendProfileFuture == null) {
-                              return ElevatedButton.icon(
-                                onPressed: () {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text("Friend has not added a mobile number."),
-                                      ),
-                                    );
-                                  }
-                                },
-                                icon: const Icon(Icons.notifications_active),
-                                label: const Text("Send Reminder"),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.orangeAccent,
-                                  foregroundColor: Colors.white,
-                                  minimumSize: const Size(double.infinity, 50),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                ),
+                            ),
+                            const SizedBox(height: 10),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (personTransactions.isEmpty)
+                      const SliverToBoxAdapter(
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                          child: Center(
+                            child: Text(
+                              "No active transactions found.",
+                              style: TextStyle(fontSize: 16, color: Colors.grey),
+                            ),
+                          ),
+                        ),
+                      )
+                    else
+                      SliverPadding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        sliver: SliverList(
+                          delegate: SliverChildBuilderDelegate(
+                            (context, index) {
+                              final group = grouped[index];
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _buildDateHeader(group.dateLabel),
+                                  const SizedBox(height: 4),
+                                  _buildTransactionsTable(group.transactions),
+                                  const SizedBox(height: 12),
+                                ],
                               );
-                            }
-                            if (snapshot.connectionState == ConnectionState.waiting &&
-                                (mobileNumber == null || mobileNumber.trim().isEmpty)) {
-                              return const Padding(
-                                padding: EdgeInsets.only(top: 8),
-                                child: SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                              );
-                            }
-                            return ElevatedButton.icon(
-                              onPressed: () async {
-                                if (mobileNumber == null || mobileNumber.trim().isEmpty) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text("Friend has not added a mobile number."),
-                                      ),
-                                    );
-                                  }
-                                  return;
-                                }
-
-                                final normalizedMobile = _normalizePhoneNumber(mobileNumber.trim());
-                                if (normalizedMobile.isEmpty) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text("Friend has not added a mobile number."),
-                                      ),
-                                    );
-                                  }
-                                  return;
-                                }
-
-                                final amountText = netBalance.toStringAsFixed(0);
-                                final message = 'Hi $_displayName,\n\n'
-                                    'According to Hisab Kitab, you currently owe ₹$amountText.\n\n'
-                                    'You can settle it whenever convenient.\n\n'
-                                    'Thanks 🙂';
-
-                                final whatsappUri = Uri.parse(
-                                  'https://wa.me/$normalizedMobile?text=${Uri.encodeComponent(message)}',
-                                );
-
-                                try {
-                                  final launched = await launchUrl(
-                                    whatsappUri,
-                                    mode: LaunchMode.externalApplication,
-                                  );
-                                  if (!launched) {
-                                    if (context.mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(
-                                          content: Text('Could not launch WhatsApp.'),
-                                        ),
-                                      );
-                                    }
-                                  }
-                                } catch (e) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text('Could not launch WhatsApp: $e'),
-                                      ),
-                                    );
-                                  }
-                                }
-                              },
-                              icon: const Icon(Icons.notifications_active),
-                              label: const Text("Send Reminder"),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.orangeAccent,
-                                foregroundColor: Colors.white,
-                                minimumSize: const Size(double.infinity, 50),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                            );
-                          })(),
-                        ],
-                      ],
-                      const SizedBox(height: 20),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                "Transaction History",
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              _buildTransactionsTable(),
-                              const SizedBox(height: 16),
-                              _buildDeletedTransactionsSection(),
-                            ],
+                            },
+                            childCount: grouped.length,
                           ),
                         ),
                       ),
-                    ],
-                  ),
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: _buildDeletedTransactionsSection(),
+                      ),
+                    ),
+                  ],
                 );
               },
             ),
@@ -5988,7 +7141,7 @@ class SettlementHistoryPage extends StatelessWidget {
           var settlements = docs.map((doc) => doc.data()).toList();
 
           if (friendName != null) {
-            final filterName = friendName!.trim().toLowerCase();
+            final filterName = (friendName ?? '').trim().toLowerCase();
             settlements = settlements.where((item) {
               final itemFriend = (item['friendName'] as String? ?? '').trim().toLowerCase();
               return itemFriend == filterName;
@@ -6038,7 +7191,7 @@ class SettlementHistoryPage extends StatelessWidget {
                 margin: const EdgeInsets.only(bottom: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
-                  side: BorderSide(color: Colors.grey[850]!),
+                  side: BorderSide(color: Colors.grey[850] ?? const Color(0xFF212121)),
                 ),
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -6110,6 +7263,173 @@ class SettlementHistoryPage extends StatelessWidget {
             },
           );
         },
+      ),
+    );
+  }
+}
+
+class GlassActionButton extends StatefulWidget {
+  final IconData icon;
+  final Color color;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  const GlassActionButton({
+    super.key,
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  @override
+  State<GlassActionButton> createState() => _GlassActionButtonState();
+}
+
+class _GlassActionButtonState extends State<GlassActionButton> {
+  bool _isPressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final buttonColor = widget.color;
+    return Tooltip(
+      message: widget.tooltip,
+      child: GestureDetector(
+        onTapDown: (_) => setState(() => _isPressed = true),
+        onTapUp: (_) => setState(() => _isPressed = false),
+        onTapCancel: () => setState(() => _isPressed = false),
+        onTap: widget.onPressed,
+        child: AnimatedScale(
+          scale: _isPressed ? 0.92 : 1.0,
+          duration: const Duration(milliseconds: 100),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 100),
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E1E1E), // Subtle dark background matching dark theme cards
+              borderRadius: BorderRadius.circular(10), // Rounded-square border radius (10-12px)
+              border: Border.all(
+                color: buttonColor.withValues(alpha: _isPressed ? 0.95 : 0.6),
+                width: 1.0, // Thin colored border
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.35),
+                  blurRadius: 3,
+                  offset: const Offset(0, 1.5), // Subtle shadow/elevation for depth
+                ),
+              ],
+            ),
+            child: Center(
+              child: Icon(
+                widget.icon,
+                color: buttonColor,
+                size: 20, // Bold centered icon
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class OlivePremiumButton extends StatefulWidget {
+  final IconData icon;
+  final String title;
+  final String description;
+  final VoidCallback onTap;
+
+  const OlivePremiumButton({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.onTap,
+  });
+
+  @override
+  State<OlivePremiumButton> createState() => _OlivePremiumButtonState();
+}
+
+class _OlivePremiumButtonState extends State<OlivePremiumButton> {
+  bool _isPressed = false;
+  static const Color oliveColor = Color(0xFF9EA98F);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedScale(
+      scale: _isPressed ? 0.96 : 1.0,
+      duration: const Duration(milliseconds: 100),
+      child: Container(
+        decoration: BoxDecoration(
+          color: oliveColor.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: oliveColor.withValues(alpha: 0.4),
+            width: 1.5,
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: widget.onTap,
+            onTapDown: (_) => setState(() => _isPressed = true),
+            onTapCancel: () => setState(() => _isPressed = false),
+            onHighlightChanged: (highlighted) {
+              if (!highlighted) {
+                setState(() => _isPressed = false);
+              }
+            },
+            borderRadius: BorderRadius.circular(16),
+            splashColor: oliveColor.withValues(alpha: 0.25),
+            highlightColor: oliveColor.withValues(alpha: 0.15),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: oliveColor.withValues(alpha: 0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      widget.icon,
+                      color: oliveColor,
+                      size: 26,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.title,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: oliveColor,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          widget.description,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
