@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -55,3 +57,28 @@ dependencies {
     implementation("com.google.android.gms:play-services-base:18.10.0")
     implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
 }
+
+tasks.matching { it.name == "stripReleaseDebugSymbols" }.configureEach {
+    dependsOn(tasks.matching { it.name.contains("FlutterBuild") || it.name.contains("mergeReleaseJniLib") })
+    doLast {
+        val buildDir = project.layout.buildDirectory.get().asFile
+        val mergedDir = File(buildDir, "intermediates/merged_jni_libs/release/mergeReleaseJniLibFolders/out")
+        val strippedDir = File(buildDir, "intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib")
+        if (mergedDir.exists() && strippedDir.exists()) {
+            mergedDir.listFiles()?.forEach { abiDir: File ->
+                if (abiDir.isDirectory) {
+                    val libApp = File(abiDir, "libapp.so")
+                    if (libApp.exists()) {
+                        val targetAbiDir = File(strippedDir, abiDir.name)
+                        targetAbiDir.mkdirs()
+                        libApp.copyTo(File(targetAbiDir, "libapp.so"), overwrite = true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+
