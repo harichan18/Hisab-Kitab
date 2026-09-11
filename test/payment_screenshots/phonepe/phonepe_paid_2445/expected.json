@@ -1,0 +1,9 @@
+{
+  "name": "phonepe_paid_2445",
+  "expectedAmount": 2445.0,
+  "expectedAmountPaise": 244500,
+  "expectedStatus": "successful",
+  "expectedDirection": "paid",
+  "expectedReceiver": "Basudev",
+  "expectedPaymentApp": "PhonePe"
+}

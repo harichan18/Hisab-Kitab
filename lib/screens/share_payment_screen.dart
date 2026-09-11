@@ -664,7 +664,7 @@ class _SharePaymentScreenState extends State<SharePaymentScreen> {
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: cardBorder),
                 image: DecorationImage(
-                  image: FileImage(File(widget.imagePath)),
+                  image: ResizeImage(FileImage(File(widget.imagePath)), width: 360),
                   fit: BoxFit.cover,
                 ),
                 boxShadow: [
@@ -864,7 +864,7 @@ class _SharePaymentScreenState extends State<SharePaymentScreen> {
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: cardBorder),
                 image: DecorationImage(
-                  image: FileImage(File(widget.imagePath)),
+                  image: ResizeImage(FileImage(File(widget.imagePath)), width: 480),
                   fit: BoxFit.contain,
                 ),
                 color: isDark ? const Color(0xFF0F1216) : const Color(0xFFF3F4F6),

@@ -17,6 +17,16 @@ class AmountParser {
   ///
   /// Returns `null` if the input is null, empty, or cannot be parsed into a positive number.
   /// NEVER returns 0.0 as a fallback for invalid input.
+  /// Normalizes Devanagari numerals (०-९) into standard Arabic digits (0-9).
+  static String normalizeNumerals(String input) {
+    const devanagariDigits = ['०', '१', '२', '३', '४', '५', '६', '७', '८', '९'];
+    var result = input;
+    for (int i = 0; i < 10; i++) {
+      result = result.replaceAll(devanagariDigits[i], '$i');
+    }
+    return result;
+  }
+
   static double? parseAmount(String? raw) {
     if (raw == null) return null;
     final trimmed = raw.trim();
@@ -25,8 +35,11 @@ class AmountParser {
     // Reject negative numbers
     if (trimmed.contains('-')) return null;
 
+    // Normalize any Devanagari numerals to standard digits (e.g. १२ -> 12)
+    final normalized = normalizeNumerals(trimmed);
+
     // Remove currency indicators: ₹, \u20B9, \u20A8, Rs, INR, Re
-    var cleaned = trimmed.replaceAll(
+    var cleaned = normalized.replaceAll(
       RegExp(r'(?:[₹\u20B9\u20A8]|rs\.?|inr|re\.?|paid|amount|you paid|sent)', caseSensitive: false),
       '',
     );

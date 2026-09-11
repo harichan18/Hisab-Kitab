@@ -1,0 +1,9 @@
+{
+  "name": "phonepe_paid_1",
+  "expectedAmount": 1.0,
+  "expectedAmountPaise": 100,
+  "expectedStatus": "successful",
+  "expectedDirection": "paid",
+  "expectedReceiver": "Divyanshu Nago Thakare",
+  "expectedPaymentApp": "PhonePe"
+}

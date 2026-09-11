@@ -71,6 +71,194 @@ Done
       expect(result.receiverName?.toUpperCase(), contains('DIVYANSHU'));
       expect(result.dateString, '2026-09-11');
     });
+
+    // TEST 4: PhonePe - Received from Divyanshu (₹12) with date and timestamp
+    test('TEST 4: PhonePe Received from Divyanshu ₹12 -> Amount = 12.0, Receiver = DIVYANSHU NAGO THAKARE, NOT 202', () {
+      const rawText = '''
+Transaction Successful
+09:16 pm on 11 Sept 2026
+Received from
+Divyanshu
++917499752312
+₹12
+Banking Name : Divyanshu Nago Thakare
+Transfer Details
+PhonePe Transaction ID
+T2609112116182791351026
+Credited to
+UPI • XXXXXX5649@sic
+₹12
+UTR: 837870957272
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.status, PaymentStatus.successful);
+      expect(result.amount, 12.0);
+      expect(result.appName, 'PhonePe');
+      expect(result.receiverName?.toUpperCase(), contains('DIVYANSHU'));
+      expect(result.dateString, '2026-09-11');
+      expect(result.transactionRef, '837870957272');
+    });
+
+    // TEST 5: Date string "09:16 pm on 11 Sept 2026" does not produce 202 or 2026 as amount
+    test('TEST 5: Date line "09:16 pm on 11 Sept 2026" is never parsed as amount 202', () {
+      const rawText = '''
+Transaction Successful
+09:16 pm on 11 Sept 2026
+Paid to
+Rahul Kumar
+₹500
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.amount, 500.0);
+    });
+
+    // TEST 6: PhonePe - Dropped rupee symbol (line is just "12")
+    test('TEST 6: PhonePe with dropped currency symbol (standalone "12") -> Amount = 12.0', () {
+      const rawText = '''
+Transaction Successful
+09:16 pm on 11 Sept 2026
+Received from
+Divyanshu
++917499752312
+12
+Banking Name : Divyanshu Nago Thakare
+Transfer Details
+PhonePe Transaction ID
+T2609112116182791351026
+Credited to
+UPI • XXXXXX5649@sic
+12
+UTR: 837870957272
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.status, PaymentStatus.successful);
+      expect(result.amount, 12.0);
+      expect(result.appName, 'PhonePe');
+      expect(result.receiverName?.toUpperCase(), contains('DIVYANSHU'));
+    });
+
+    // TEST 7: PhonePe - Embedded name + amount "Divyanshu 12"
+    test('TEST 7: PhonePe with embedded name and amount "Divyanshu 12" -> Amount = 12.0', () {
+      const rawText = '''
+Transaction Successful
+09:16 pm on 11 Sept 2026
+Received from
+Divyanshu 12
++917499752312
+Banking Name : Divyanshu Nago Thakare
+Transfer Details
+PhonePe Transaction ID
+T2609112116182791351026
+Credited to
+UPI • XXXXXX5649@sic 12
+UTR: 837870957272
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.status, PaymentStatus.successful);
+      expect(result.amount, 12.0);
+      expect(result.receiverName?.toUpperCase(), contains('DIVYANSHU'));
+    });
+
+    // TEST 8: PhonePe - Masked UPI handle (XXXXXX5649@sic) is NEVER extracted as amount 5649
+    test('TEST 8: Masked account 5649 in XXXXXX5649@sic is rejected, amount 12 is extracted', () {
+      const rawText = '''
+Transaction Successful
+09:16 pm on 11 Sept 2026
+Received from
+Divyanshu
++917499752312
+₹12
+Banking Name : Divyanshu Nago Thakare
+Transfer Details
+PhonePe Transaction ID
+T2609112116182791351026
+Credited to
+UPI • XXXXXX5649@sic
+₹12
+UTR: 837870957272
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.amount, 12.0);
+      expect(result.amount, isNot(5649.0));
+      expect(result.amount, isNot(202.0));
+    });
+
+    // TEST 9: Devanagari numerals (₹१२) normalized and extracted accurately as 12.0
+    test('TEST 9: Devanagari numerals ₹१२ are normalized to 12.0', () {
+      const rawText = '''
+Transaction Successful
+Received from
+Divyanshu
+₹१२
+Banking Name : Divyanshu Nago Thakare
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.amount, 12.0);
+    });
+
+    // TEST 10: Navi UPI - ₹149 to B M MOBILE 1 (should NOT extract 1 from MOBILE 1)
+    test('TEST 10: Navi UPI ₹149 -> Amount = 149.0, NOT 1.0 from B M MOBILE 1', () {
+      const rawText = '''
+Paid securely on
+navi UPI
+Get up to 1,000 on every payment 1 = 1 paisa
+Payment successful
+to B M MOBILE 1
+WL0502560A0030816@unionbank
+₹149
+Paid via Navi UPI
+8 Oct 2025, 8:00 PM
+from Sandeep Dewasi
+State Bank of India - 8590
+UPI txn ID : 564711273729
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.amount, 149.0);
+      expect(result.receiverName, 'B M MOBILE 1');
+    });
+
+    // TEST 11: PhonePe - Only occurrence of amount is on the Credited to line with masked account
+    test('TEST 11: PhonePe amount 12 extracted when only on Credited to line with masked account', () {
+      const rawText = '''
+Transaction Successful
+09:16 pm on 11 Sept 2026
+Received from
+Divyanshu
++917499752312
+Banking Name : Divyanshu Nago Thakare
+Transfer Details
+PhonePe Transaction ID
+T2609112116182791351026
+Credited to
+UPI • XXXXXX5649@sic ₹12
+UTR: 837870957272
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.amount, 12.0);
+      expect(result.receiverName?.toUpperCase(), contains('DIVYANSHU'));
+      expect(result.appName, 'PhonePe');
+    });
+
+    // TEST 12: PhonePe - Dropped currency symbol across both occurrences (Divyanshu 12 & XXXXXX5649@sic 12)
+    test('TEST 12: PhonePe dropped rupee symbols across both lines -> Amount = 12.0', () {
+      const rawText = '''
+Transaction Successful
+09:16 pm on 11 Sept 2026
+Received from
+Divyanshu 12
++917499752312
+Banking Name : Divyanshu Nago Thakare
+Transfer Details
+PhonePe Transaction ID
+T2609112116182791351026
+Credited to
+UPI • XXXXXX5649@sic 12
+UTR: 837870957272
+''';
+      final result = PaymentOcrService.instance.parseExtractedText(rawText);
+      expect(result.amount, 12.0);
+      expect(result.receiverName?.toUpperCase(), contains('DIVYANSHU'));
+    });
   });
 
   group('Indian Currency Formats and AmountParser Tests', () {

@@ -1,0 +1,9 @@
+{
+  "name": "phonepe_received_9000",
+  "expectedAmount": 9000.0,
+  "expectedAmountPaise": 900000,
+  "expectedStatus": "successful",
+  "expectedDirection": "received",
+  "expectedReceiver": "Gajendra Kumar",
+  "expectedPaymentApp": "PhonePe"
+}
