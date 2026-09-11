@@ -52,6 +52,7 @@ dependencies:
   open_file: ^3.5.11
   shared_preferences: ^2.3.5
   shimmer: ^3.0.0
+  google_mlkit_text_recognition: ^0.17.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

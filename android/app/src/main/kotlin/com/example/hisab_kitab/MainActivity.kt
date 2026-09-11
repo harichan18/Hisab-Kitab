@@ -3,6 +3,7 @@ package com.example.hisab_kitab
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import android.content.pm.PackageManager
 import android.util.Log
@@ -11,10 +12,95 @@ import com.google.android.gms.common.GoogleApiAvailability
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
+    private var initialSharedImagePath: String? = null
+    private var shareReceiverChannel: MethodChannel? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        initialSharedImagePath = handleSendImage(intent)
+        if (initialSharedImagePath != null) {
+            Log.d("SHARE_DEBUG", "Cold-start shared image path: $initialSharedImagePath")
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val imagePath = handleSendImage(intent)
+        if (imagePath != null) {
+            Log.d("SHARE_DEBUG", "Warm-start shared image path: $imagePath")
+            initialSharedImagePath = imagePath
+            shareReceiverChannel?.invokeMethod("onImageShared", imagePath)
+        }
+    }
+
+    private fun handleSendImage(intent: Intent?): String? {
+        if (intent == null) return null
+        val action = intent.action
+        val type = intent.type
+        if (Intent.ACTION_SEND == action && type != null && type.startsWith("image/")) {
+            val imageUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            }
+
+            if (imageUri != null) {
+                return copyUriToCache(imageUri)
+            }
+        }
+        return null
+    }
+
+    private fun copyUriToCache(uri: Uri): String? {
+        return try {
+            val shareDir = File(cacheDir, "shared_images").apply { mkdirs() }
+            val fileName = "shared_screenshot_${System.currentTimeMillis()}.jpg"
+            val destFile = File(shareDir, fileName)
+
+            contentResolver.openInputStream(uri)?.use { inputStream ->
+                FileOutputStream(destFile).use { outputStream ->
+                    inputStream.copyTo(outputStream)
+                }
+            }
+            Log.d("SHARE_DEBUG", "Successfully copied shared image to: ${destFile.absolutePath}")
+            destFile.absolutePath
+        } catch (e: Exception) {
+            Log.e("SHARE_DEBUG", "Failed to copy shared image from URI: $uri", e)
+            null
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        val shareChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "hisab_kitab/share_receiver"
+        )
+        shareReceiverChannel = shareChannel
+        shareChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getInitialSharedImage" -> {
+                    val path = initialSharedImagePath
+                    // Clear to avoid duplicate processing
+                    initialSharedImagePath = null
+                    result.success(path)
+                }
+                "clearSharedImage" -> {
+                    initialSharedImagePath = null
+                    result.success(true)
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,

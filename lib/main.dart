@@ -32,6 +32,8 @@ import 'widgets/app_drawer.dart';
 import 'screens/daily_expenditure_screen.dart';
 import 'screens/reports_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/share_payment_screen.dart';
+import 'services/share_receiver_service.dart';
 import 'theme/app_theme.dart';
 
 const String _googleServerClientId =
@@ -3325,17 +3327,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   _user1FriendsSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _user2FriendsSubscription;
+  StreamSubscription<String>? _shareImageSubscription;
+  bool _isHandlingShare = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     initializeHome();
+    _shareImageSubscription =
+        ShareReceiverService.instance.sharedImageStream.listen(_handleIncomingSharedImage);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkInitialSharedImage();
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _shareImageSubscription?.cancel();
     _transactionsSubscription?.cancel();
     _bankBalanceSubscription?.cancel();
     _user1FriendsSubscription?.cancel();
@@ -3347,10 +3357,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _checkInitialSharedImage();
       if (_isCheckingInstallPermission && _pendingApkPath != null) {
         _isCheckingInstallPermission = false;
         _handleReturnFromInstallSettings();
       }
+    }
+  }
+
+  Future<void> _checkInitialSharedImage() async {
+    final path = await ShareReceiverService.instance.checkInitialSharedImage();
+    if (path != null && path.isNotEmpty) {
+      _handleIncomingSharedImage(path);
+    }
+  }
+
+  Future<void> _handleIncomingSharedImage(String path) async {
+    if (!mounted || _isHandlingShare) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      debugPrint('[Home] User not logged in, share will wait until authenticated.');
+      return;
+    }
+
+    _isHandlingShare = true;
+    ShareReceiverService.instance.clearPendingImage();
+
+    try {
+      final result = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SharePaymentScreen(imagePath: path),
+        ),
+      );
+
+      if (result == true && mounted) {
+        await loadData();
+        await loadExpenses();
+        await loadFirestoreFriends();
+      }
+    } catch (e) {
+      debugPrint('[Home] Error opening SharePaymentScreen: $e');
+    } finally {
+      _isHandlingShare = false;
     }
   }
 
@@ -5960,6 +6009,75 @@ class _AddPageState extends State<AddPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (widget.transaction == null) ...[
+              InkWell(
+                onTap: () async {
+                  final picker = ImagePicker();
+                  final picked = await picker.pickImage(source: ImageSource.gallery);
+                  if (picked != null && context.mounted) {
+                    final result = await Navigator.push<bool>(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SharePaymentScreen(imagePath: picked.path),
+                      ),
+                    );
+                    if (result == true && context.mounted) {
+                      Navigator.pop(context, true);
+                    }
+                  }
+                },
+                borderRadius: BorderRadius.circular(14),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF1E222A) : const Color(0xFFF3F4F6),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: cardBorder, width: 0.8),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: isDark ? const Color(0xFF272D37) : Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(
+                          Icons.document_scanner_rounded,
+                          size: 20,
+                          color: isDark ? Colors.white : const Color(0xFF111827),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "Auto-Extract from Payment Screenshot",
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: textColor,
+                              ),
+                            ),
+                            Text(
+                              "Scan GPay, PhonePe, Paytm screenshot & split",
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: hintColor,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(Icons.arrow_forward_ios_rounded, size: 14, color: hintColor),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
             TextField(
               controller: friendController,
               style: TextStyle(color: textColor, fontWeight: FontWeight.w500),
