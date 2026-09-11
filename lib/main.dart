@@ -30,6 +30,9 @@ import 'models/expense_model.dart';
 import 'services/expense_service.dart';
 import 'widgets/app_drawer.dart';
 import 'screens/daily_expenditure_screen.dart';
+import 'screens/reports_screen.dart';
+import 'screens/settings_screen.dart';
+import 'theme/app_theme.dart';
 
 const String _googleServerClientId =
     '614565157950-q0vb676dva84bp5eg102ca1spv6nh0os.apps.googleusercontent.com';
@@ -219,6 +222,12 @@ class AppPrefs {
     _prefs = await SharedPreferences.getInstance();
   }
 
+  // Dark mode persistence
+  static bool isDarkMode() => _prefs?.getBool('is_dark_mode') ?? false;
+  static Future<void> setDarkMode(bool value) async {
+    await _prefs?.setBool('is_dark_mode', value);
+  }
+
   // Bank balance
   static double getBankBalance() => _prefs?.getDouble('bank_balance') ?? 0.0;
   static Future<void> setBankBalance(double value) async {
@@ -230,7 +239,19 @@ class AppPrefs {
   static Future<void> setProfileComplete(bool value) async {
     await _prefs?.setBool('profile_complete', value);
   }
+
+  // Cached User Name
+  static String getUserName() => _prefs?.getString('cached_user_name') ?? '';
+  static Future<void> setUserName(String value) async {
+    if (value.trim().isNotEmpty) {
+      await _prefs?.setString('cached_user_name', value.trim());
+    }
+  }
 }
+
+final ValueNotifier<ThemeMode> themeModeNotifier = ValueNotifier<ThemeMode>(
+  AppPrefs.isDarkMode() ? ThemeMode.dark : ThemeMode.light,
+);
 
 class CustomCachedImage extends StatefulWidget {
   final String url;
@@ -408,25 +429,15 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        popupMenuTheme: PopupMenuThemeData(
-          color: Colors.grey[900],
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-            side: BorderSide(
-              color: Colors.grey[800]?.withValues(alpha: 0.5) ?? const Color(0x80424242),
-              width: 1,
-            ),
-          ),
-          elevation: 8,
-          shadowColor: Colors.black.withValues(alpha: 0.4),
-          surfaceTintColor: Colors.transparent,
-          menuPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-        ),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeModeNotifier,
+      builder: (context, currentMode, _) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.lightTheme,
+        darkTheme: AppTheme.darkTheme,
+        themeMode: currentMode,
+        home: const AuthGate(),
       ),
-      home: const AuthGate(),
     );
   }
 }
@@ -1108,6 +1119,7 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: AppColors.background,
       body: SafeArea(
         child: FadeTransition(
           opacity: _fadeAnimation,
@@ -1117,22 +1129,46 @@ class _SplashScreenState extends State<SplashScreen>
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(24),
-                      child: Image.asset(
-                        'assets/images/logo.png',
-                        width: 140,
-                        height: 140,
-                        fit: BoxFit.cover,
+                    Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(28),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.06),
+                            blurRadius: 20,
+                            offset: const Offset(0, 8),
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(24),
+                        child: Image.asset(
+                          'assets/images/logo.png',
+                          width: 120,
+                          height: 120,
+                          fit: BoxFit.cover,
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 20),
                     const Text(
                       "Hisab Kitab",
                       style: TextStyle(
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.5,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.textPrimary,
+                        letterSpacing: -0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      "Keep track. Stay sorted.",
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: AppColors.textSecondary,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ],
@@ -1147,17 +1183,17 @@ class _SplashScreenState extends State<SplashScreen>
                     children: const [
                       Text(
                         "made by ",
-                        style: TextStyle(fontSize: 16, color: Colors.grey),
+                        style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
                       ),
                       Text(
                         "Harichan Kushwaha",
                         style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary,
                         ),
                       ),
-                      Text(" \u2764", style: TextStyle(fontSize: 18)),
+                      Text("  ❤️", style: TextStyle(fontSize: 13)),
                     ],
                   ),
                 ),
@@ -1443,58 +1479,101 @@ class _ProfilePageState extends State<ProfilePage> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return Scaffold(
-      appBar: AppBar(title: const Text("Profile"), centerTitle: true),
-      body: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        future: _profileFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
+      backgroundColor: isDark ? AppColors.backgroundDark : AppColors.background,
+      appBar: AppBar(
+        title: Text(
+          "Profile",
+          style: TextStyle(
+            color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        centerTitle: true,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: IconThemeData(color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary),
+      ),
+      body: SafeArea(
+        bottom: true,
+        child: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          future: _profileFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Center(child: CircularProgressIndicator());
+            }
 
-          if (snapshot.hasError) {
-            return const Center(child: Text("Unable to load profile."));
-          }
+            if (snapshot.hasError) {
+              return Center(
+                child: Text(
+                  "Unable to load profile.",
+                  style: TextStyle(color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary),
+                ),
+              );
+            }
 
-          final data = snapshot.data?.data() ?? {};
-          if (!_upiInitialized) {
-            _upiController.text = data['upiId'] as String? ?? '';
-            _upiInitialized = true;
-          }
-          if (!_mobileInitialized) {
-            _mobileController.text = data['mobileNumber'] as String? ?? '';
-            _mobileInitialized = true;
-          }
-          final name = data['name'] as String? ?? '';
-          final email = data['email'] as String? ?? '';
-          final photoUrl = data['photoUrl'] as String?;
-          final friendCode = data['friendCode'] as String? ?? '';
+            final data = snapshot.data?.data() ?? {};
+            if (!_upiInitialized) {
+              _upiController.text = data['upiId'] as String? ?? '';
+              _upiInitialized = true;
+            }
+            if (!_mobileInitialized) {
+              _mobileController.text = data['mobileNumber'] as String? ?? '';
+              _mobileInitialized = true;
+            }
+            final name = data['name'] as String? ?? '';
+            final email = data['email'] as String? ?? '';
+            final photoUrl = data['photoUrl'] as String?;
+            final friendCode = data['friendCode'] as String? ?? '';
 
-          return SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
+            return SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 48),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 6),
+                  // Profile Photo
                   Center(
                     child: GestureDetector(
                       onTap: _isUploading ? null : _pickAndUploadProfilePhoto,
                       child: Stack(
                         children: [
-                          CircleAvatar(
-                            radius: 56,
-                            backgroundColor: Colors.grey[800],
-                            child: photoUrl == null || photoUrl.isEmpty
-                                ? const Icon(Icons.person, size: 56)
-                                : ClipOval(
-                                    child: CustomCachedImage(
-                                      url: photoUrl,
-                                      width: 112,
-                                      height: 112,
-                                      fit: BoxFit.cover,
+                          Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                                width: 2,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.06),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            child: CircleAvatar(
+                              radius: 44,
+                              backgroundColor: isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant,
+                              child: photoUrl == null || photoUrl.isEmpty
+                                  ? Icon(
+                                      Icons.person,
+                                      size: 44,
+                                      color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                                    )
+                                  : ClipOval(
+                                      child: CustomCachedImage(
+                                        url: photoUrl,
+                                        width: 88,
+                                        height: 88,
+                                        fit: BoxFit.cover,
+                                      ),
                                     ),
-                                  ),
+                            ),
                           ),
                           Positioned(
                             bottom: 0,
@@ -1502,21 +1581,21 @@ class _ProfilePageState extends State<ProfilePage> {
                             child: Container(
                               padding: const EdgeInsets.all(6),
                               decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.primary,
+                                color: isDark ? const Color(0xFF27272A) : AppColors.darkCard,
                                 shape: BoxShape.circle,
                               ),
                               child: _isUploading
                                   ? const SizedBox(
-                                      width: 18,
-                                      height: 18,
+                                      width: 14,
+                                      height: 14,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
                                         color: Colors.white,
                                       ),
                                     )
                                   : const Icon(
-                                      Icons.camera_alt,
-                                      size: 18,
+                                      Icons.camera_alt_rounded,
+                                      size: 14,
                                       color: Colors.white,
                                     ),
                             ),
@@ -1525,189 +1604,407 @@ class _ProfilePageState extends State<ProfilePage> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 10),
+
+                  // Name & Email
                   Center(
                     child: Text(
                       name,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                        letterSpacing: -0.3,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 2),
                   Center(
                     child: Text(
                       email,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.grey),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 32),
-                  const Text(
-                    "Friend Code",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    friendCode,
-                    style: const TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.5,
+                  const SizedBox(height: 14),
+
+                  // 1. Friend Code Card (Full-width, Copy & Share on the right)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: isDark ? AppColors.surfaceDark : Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                        width: 0.8,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                "Friend Code",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  friendCode,
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                                    letterSpacing: 1.2,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        // Copy Button
+                        InkWell(
+                          onTap: () {
+                            Clipboard.setData(ClipboardData(text: friendCode));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Friend code copied to clipboard!')),
+                            );
+                          },
+                          borderRadius: BorderRadius.circular(10),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: isDark ? const Color(0xFF3A4150) : const Color(0xFFE5E7EB),
+                                width: 1.0,
+                              ),
+                              color: isDark ? const Color(0xFF1E222A) : const Color(0xFFF3F4F6),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.copy_rounded,
+                                  size: 14,
+                                  color: isDark ? Colors.white : AppColors.textPrimary,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  "Copy",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: isDark ? Colors.white : AppColors.textPrimary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        // Share Button
+                        InkWell(
+                          onTap: () {
+                            SharePlus.instance.share(
+                              ShareParams(
+                                text: "My Hisab Kitab Friend Code is: $friendCode",
+                              ),
+                            );
+                          },
+                          borderRadius: BorderRadius.circular(10),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: isDark ? const Color(0xFF3A4150) : const Color(0xFFE5E7EB),
+                                width: 1.0,
+                              ),
+                              color: isDark ? const Color(0xFF1E222A) : const Color(0xFFF3F4F6),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.share_rounded,
+                                  size: 14,
+                                  color: isDark ? Colors.white : AppColors.textPrimary,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  "Share",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: isDark ? Colors.white : AppColors.textPrimary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: friendCode));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Friend code copied to clipboard!')),
-                          );
-                        },
-                        icon: const Icon(Icons.copy_rounded, size: 16),
-                        label: const Text("Copy Code"),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.amber,
-                          side: const BorderSide(color: Colors.amber),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
+
+                  // 2. UPI ID Card (Full-width, field + Save button in one row)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: isDark ? AppColors.surfaceDark : Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                        width: 0.8,
                       ),
-                      const SizedBox(width: 12),
-                      OutlinedButton.icon(
-                        onPressed: () {
-                          SharePlus.instance.share(
-                            ShareParams(
-                              text: "My Hisab Kitab Friend Code is: $friendCode",
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.share_rounded, size: 16),
-                        label: const Text("Share Code"),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.amber,
-                          side: const BorderSide(color: Colors.amber),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "UPI ID",
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 32),
-                  const Text(
-                    "UPI ID",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextFormField(
-                          controller: _upiController,
-                          decoration: const InputDecoration(
-                            hintText: "Enter UPI ID (e.g., name@okbank)",
-                            border: OutlineInputBorder(),
-                            contentPadding: EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: _isSavingUpi ? null : _saveUpi,
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 16,
-                          ),
-                          backgroundColor: Colors.amber,
-                          foregroundColor: Colors.black,
-                        ),
-                        child: _isSavingUpi
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.black,
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant.withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                                    width: 0.8,
+                                  ),
                                 ),
-                              )
-                            : const Text("Save"),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  const Text(
-                    "Mobile Number",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextFormField(
-                          controller: _mobileController,
-                          keyboardType: TextInputType.phone,
-                          decoration: const InputDecoration(
-                            hintText: "Enter mobile number (e.g., 9876543210)",
-                            border: OutlineInputBorder(),
-                            contentPadding: EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: _isSavingMobile ? null : _saveMobile,
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 16,
-                          ),
-                          backgroundColor: Colors.amber,
-                          foregroundColor: Colors.black,
-                        ),
-                        child: _isSavingMobile
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.black,
+                                child: TextFormField(
+                                  controller: _upiController,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                                  ),
+                                  decoration: InputDecoration(
+                                    hintText: "Enter UPI ID (e.g., name@okbank)",
+                                    hintStyle: TextStyle(
+                                      fontSize: 12,
+                                      color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                                    ),
+                                    prefixIcon: Icon(
+                                      Icons.account_balance_wallet_outlined,
+                                      size: 16,
+                                      color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                                    ),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                  ),
                                 ),
-                              )
-                            : const Text("Save"),
-                      ),
-                    ],
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            SizedBox(
+                              height: 42,
+                              child: ElevatedButton(
+                                onPressed: _isSavingUpi ? null : _saveUpi,
+                                style: ElevatedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                                  backgroundColor: isDark ? Colors.white : const Color(0xFF111827),
+                                  foregroundColor: isDark ? Colors.black87 : Colors.white,
+                                  elevation: 0,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: _isSavingUpi
+                                    ? SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: isDark ? Colors.black87 : Colors.white,
+                                        ),
+                                      )
+                                    : const Text(
+                                        "Save",
+                                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                                      ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 48),
+                  const SizedBox(height: 12),
+
+                  // 3. Mobile Number Card (Full-width, field + Save button in one row)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: isDark ? AppColors.surfaceDark : Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                        width: 0.8,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "Mobile Number",
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant.withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                                    width: 0.8,
+                                  ),
+                                ),
+                                child: TextFormField(
+                                  controller: _mobileController,
+                                  keyboardType: TextInputType.phone,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                                  ),
+                                  decoration: InputDecoration(
+                                    hintText: "Enter mobile number (e.g., 9876543210)",
+                                    hintStyle: TextStyle(
+                                      fontSize: 12,
+                                      color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                                    ),
+                                    prefixIcon: Icon(
+                                      Icons.phone_outlined,
+                                      size: 16,
+                                      color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                                    ),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            SizedBox(
+                              height: 42,
+                              child: ElevatedButton(
+                                onPressed: _isSavingMobile ? null : _saveMobile,
+                                style: ElevatedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                                  backgroundColor: isDark ? Colors.white : const Color(0xFF111827),
+                                  foregroundColor: isDark ? Colors.black87 : Colors.white,
+                                  elevation: 0,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: _isSavingMobile
+                                    ? SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: isDark ? Colors.black87 : Colors.white,
+                                        ),
+                                      )
+                                    : const Text(
+                                        "Save",
+                                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                                      ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+
+                  // 4. Logout Button (Full width, semantic red)
                   SizedBox(
-                    height: 52,
+                    height: 50,
                     child: ElevatedButton.icon(
                       onPressed: () => _logout(context),
-                      icon: const Icon(Icons.logout),
-                      label: const Text("Logout"),
+                      icon: const Icon(Icons.logout_rounded, size: 20),
+                      label: const Text(
+                        "Logout",
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
+                        backgroundColor: const Color(0xFFEF4444),
                         foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
                       ),
                     ),
                   ),
+                  const SizedBox(height: 20), // Ample bottom space so it never clips with system navigation
                 ],
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -2762,44 +3059,67 @@ class ReceiptAttachmentSection extends StatelessWidget {
   final bool isReceiptRemoved;
   final VoidCallback? onRemoveExisting;
 
-  Widget _buildPickButtons() {
+  Widget _buildPickButtons(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final btnBg = isDark ? AppColors.surfaceDark : Colors.white;
+    final btnBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final btnColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+
     return Row(
       children: [
         Expanded(
-          child: OutlinedButton(
-            onPressed: () => onPick(ImageSource.camera),
-            child: const FittedBox(
-              fit: BoxFit.scaleDown,
+          child: Container(
+            height: 46,
+            decoration: BoxDecoration(
+              color: btnBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: btnBorder, width: 1),
+            ),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(24),
+              onTap: () => onPick(ImageSource.camera),
               child: Row(
-                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.camera_alt),
-                  SizedBox(width: 8),
+                  Icon(Icons.camera_alt_rounded, size: 18, color: btnColor),
+                  const SizedBox(width: 8),
                   Text(
                     "Camera",
-                    maxLines: 1,
-                    softWrap: false,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: btnColor,
+                    ),
                   ),
                 ],
               ),
             ),
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 12),
         Expanded(
-          child: OutlinedButton(
-            onPressed: () => onPick(ImageSource.gallery),
-            child: const FittedBox(
-              fit: BoxFit.scaleDown,
+          child: Container(
+            height: 46,
+            decoration: BoxDecoration(
+              color: btnBg,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: btnBorder, width: 1),
+            ),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(24),
+              onTap: () => onPick(ImageSource.gallery),
               child: Row(
-                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.photo_library),
-                  SizedBox(width: 8),
+                  Icon(Icons.photo_library_rounded, size: 18, color: btnColor),
+                  const SizedBox(width: 8),
                   Text(
                     "Gallery",
-                    maxLines: 1,
-                    softWrap: false,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: btnColor,
+                    ),
                   ),
                 ],
               ),
@@ -2816,7 +3136,7 @@ class ReceiptAttachmentSection extends StatelessWidget {
         height: 140,
         width: double.infinity,
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(16),
           child: Image.file(
             File(receiptImage!.path),
             fit: BoxFit.cover,
@@ -2831,7 +3151,7 @@ class ReceiptAttachmentSection extends StatelessWidget {
         height: 140,
         width: double.infinity,
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(16),
           child: hasLocal
               ? Image.file(
                   File(existingReceiptPath!),
@@ -2851,6 +3171,9 @@ class ReceiptAttachmentSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+
     final hasReceipt = receiptImage != null ||
         (((existingReceiptPath != null && existingReceiptPath!.isNotEmpty) ||
           (existingReceiptUrl != null && existingReceiptUrl!.isNotEmpty)) &&
@@ -2859,15 +3182,19 @@ class ReceiptAttachmentSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
+        Text(
           "Receipt",
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+            color: textColor,
+          ),
         ),
         const SizedBox(height: 8),
         if (hasReceipt) ...[
           _buildPreview(),
           const SizedBox(height: 12),
-          _buildPickButtons(),
+          _buildPickButtons(context),
           const SizedBox(height: 8),
           OutlinedButton.icon(
             key: const ValueKey('remove_receipt_btn'),
@@ -2878,23 +3205,28 @@ class ReceiptAttachmentSection extends StatelessWidget {
                 onRemoveExisting?.call();
               }
             },
-            icon: const Icon(Icons.delete, color: Colors.redAccent),
+            icon: const Icon(Icons.delete_outline_rounded, color: AppColors.payText, size: 18),
             label: const Text(
               "Remove Receipt",
-              style: TextStyle(color: Colors.redAccent),
+              style: TextStyle(color: AppColors.payText, fontWeight: FontWeight.w600),
             ),
             style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: Colors.redAccent),
+              side: const BorderSide(color: AppColors.payText),
               minimumSize: const Size(double.infinity, 44),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             ),
           ),
         ] else ...[
-          _buildPickButtons(),
+          _buildPickButtons(context),
         ],
         if (receiptUploadProgress > 0 && receiptUploadProgress < 1)
           Padding(
             padding: const EdgeInsets.only(top: 8),
-            child: LinearProgressIndicator(value: receiptUploadProgress),
+            child: LinearProgressIndicator(
+              value: receiptUploadProgress,
+              color: isDark ? Colors.white : AppColors.darkCard,
+              backgroundColor: isDark ? AppColors.surfaceVariantDark : AppColors.borderLight,
+            ),
           ),
       ],
     );
@@ -2986,7 +3318,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
   // Pre-load from cache for instant first render, SQLite will refine shortly after
   double bankBalance = AppPrefs.getBankBalance();
-  double _oldBankBalance = AppPrefs.getBankBalance();
   bool isLoading = false;
   StreamSubscription<List<TransactionModel>>? _transactionsSubscription;
   StreamSubscription<double>? _bankBalanceSubscription;
@@ -3394,7 +3725,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       if (bankBalance != amount) {
         setState(() {
-          _oldBankBalance = bankBalance;
           bankBalance = amount;
         });
         debugPrint('[Home] [Firestore Stream] bank balance snapshot loaded: $amount');
@@ -3448,7 +3778,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (bankBalance != amount) {
       debugPrint('[Home] [SQLite Load] Overwriting bankBalance: $amount');
       setState(() {
-        _oldBankBalance = bankBalance;
         bankBalance = amount;
       });
     }
@@ -3676,9 +4005,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> showBankBalanceDialog() async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final borderCol = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final cardBg = isDark ? AppColors.surfaceVariantDark : const Color(0xFFF9FAFB);
+
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[950],
+      backgroundColor: isDark ? AppColors.surfaceDark : Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
@@ -3693,17 +4028,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   width: 40,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: Colors.grey[700],
+                    color: borderCol,
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
                 const SizedBox(height: 20),
-                const Text(
+                Text(
                   "Adjust Bank Balance",
                   style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
-                    color: Colors.white,
+                    color: textColor,
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -3711,17 +4046,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   width: double.infinity,
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.grey[900],
+                    color: cardBg,
                     borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.grey[800]!),
+                    border: Border.all(color: borderCol),
                   ),
                   child: Column(
                     children: [
-                      const Text(
+                      Text(
                         "CURRENT BANK BALANCE",
                         style: TextStyle(
                           fontSize: 12,
-                          color: Colors.grey,
+                          color: subtextColor,
                           fontWeight: FontWeight.bold,
                           letterSpacing: 1.1,
                         ),
@@ -3729,10 +4064,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       const SizedBox(height: 8),
                       Text(
                         "₹${formatAmount(bankBalance)}",
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 28,
                           fontWeight: FontWeight.bold,
-                          color: Colors.white,
+                          color: textColor,
                         ),
                       ),
                     ],
@@ -3770,10 +4105,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _showAdjustmentSheet({required bool isDeduction}) {
     final controller = TextEditingController();
     final formKey = GlobalKey<FormState>();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final borderCol = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final inputBg = isDark ? AppColors.surfaceVariantDark : const Color(0xFFF9FAFB);
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[950],
+      backgroundColor: isDark ? AppColors.surfaceDark : Colors.white,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
@@ -3806,7 +4146,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           width: 40,
                           height: 4,
                           decoration: BoxDecoration(
-                            color: Colors.grey[700],
+                            color: borderCol,
                             borderRadius: BorderRadius.circular(2),
                           ),
                         ),
@@ -3814,10 +4154,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       const SizedBox(height: 20),
                       Text(
                         isDeduction ? "Deduct Money" : "Add Money",
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.bold,
-                          color: Colors.white,
+                          color: textColor,
                         ),
                       ),
                       const SizedBox(height: 16),
@@ -3827,23 +4167,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             child: Container(
                               padding: const EdgeInsets.all(12),
                               decoration: BoxDecoration(
-                                color: Colors.grey[900],
+                                color: isDark ? AppColors.surfaceVariantDark : const Color(0xFFF3F4F6),
                                 borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: Colors.grey[800]!),
+                                border: Border.all(color: borderCol),
                               ),
                               child: Column(
                                 children: [
-                                  const Text(
+                                  Text(
                                     "Current Balance",
-                                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                                    style: TextStyle(fontSize: 11, color: subtextColor),
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
                                     "₹${formatAmount(bankBalance)}",
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                       fontSize: 16,
                                       fontWeight: FontWeight.bold,
-                                      color: Colors.white,
+                                      color: textColor,
                                     ),
                                   ),
                                 ],
@@ -3851,27 +4191,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             ),
                           ),
                           const SizedBox(width: 12),
-                          const Icon(Icons.arrow_forward_rounded, color: Colors.grey),
+                          Icon(
+                            Icons.arrow_forward_rounded,
+                            color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                          ),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Container(
                               padding: const EdgeInsets.all(12),
                               decoration: BoxDecoration(
                                 color: isDeduction && previewBalance < 0
-                                    ? Colors.redAccent.withValues(alpha: 0.1)
-                                    : const Color(0xFF9EA98F).withValues(alpha: 0.1),
+                                    ? (isDark ? AppColors.payBgDark : AppColors.payBg)
+                                    : (isDark ? AppColors.collectBgDark : AppColors.collectBg),
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
                                   color: isDeduction && previewBalance < 0
-                                      ? Colors.redAccent.withValues(alpha: 0.3)
-                                      : const Color(0xFF9EA98F).withValues(alpha: 0.3),
+                                      ? AppColors.payBadge
+                                      : AppColors.collectBadge,
                                 ),
                               ),
                               child: Column(
                                 children: [
-                                  const Text(
+                                  Text(
                                     "New Balance Preview",
-                                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                                    style: TextStyle(fontSize: 11, color: subtextColor),
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
@@ -3880,8 +4223,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       fontSize: 16,
                                       fontWeight: FontWeight.bold,
                                       color: isDeduction && previewBalance < 0
-                                          ? Colors.redAccent
-                                          : const Color(0xFF9EA98F),
+                                          ? AppColors.payText
+                                          : AppColors.collectText,
                                     ),
                                   ),
                                 ],
@@ -3897,27 +4240,45 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
-                        style: const TextStyle(color: Colors.white, fontSize: 18),
+                        style: TextStyle(
+                          color: textColor,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        cursorColor: isDark ? Colors.white : AppColors.darkCard,
                         decoration: InputDecoration(
+                          filled: true,
+                          fillColor: inputBg,
                           labelText: "Amount to ${isDeduction ? 'deduct' : 'add'}",
-                          labelStyle: const TextStyle(color: Colors.grey),
+                          labelStyle: TextStyle(color: subtextColor),
+                          hintText: "500",
+                          hintStyle: TextStyle(
+                            color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                          ),
                           prefixText: "\u20B9 ",
-                          prefixStyle: const TextStyle(color: Colors.white, fontSize: 18),
+                          prefixStyle: TextStyle(
+                            color: textColor,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.grey[800]!),
+                            borderSide: BorderSide(color: borderCol),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(color: Color(0xFF9EA98F), width: 2),
+                            borderSide: BorderSide(
+                              color: isDark ? Colors.white : AppColors.darkCard,
+                              width: 1.5,
+                            ),
                           ),
                           errorBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(color: Colors.redAccent),
+                            borderSide: const BorderSide(color: AppColors.payText),
                           ),
                           focusedErrorBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(color: Colors.redAccent, width: 2),
+                            borderSide: const BorderSide(color: AppColors.payText, width: 1.5),
                           ),
                         ),
                         onChanged: (_) {
@@ -3943,16 +4304,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           Expanded(
                             child: OutlinedButton(
                               style: OutlinedButton.styleFrom(
-                                side: BorderSide(color: Colors.grey[800]!),
+                                side: BorderSide(color: borderCol),
                                 padding: const EdgeInsets.symmetric(vertical: 16),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
                                 ),
                               ),
                               onPressed: () => Navigator.pop(sheetContext),
-                              child: const Text(
+                              child: Text(
                                 "Cancel",
-                                style: TextStyle(color: Colors.white70, fontSize: 16),
+                                style: TextStyle(
+                                  color: subtextColor,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
                           ),
@@ -3960,11 +4325,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           Expanded(
                             child: ElevatedButton(
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF9EA98F),
+                                backgroundColor: isDark ? Colors.white : AppColors.darkCard,
+                                foregroundColor: isDark ? AppColors.darkCard : Colors.white,
                                 padding: const EdgeInsets.symmetric(vertical: 16),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
                                 ),
+                                elevation: 0,
                               ),
                               onPressed: () async {
                                 if (formKey.currentState?.validate() ?? false) {
@@ -3982,7 +4349,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   }
 
                                   setState(() {
-                                    _oldBankBalance = bankBalance;
                                     bankBalance = newBalance;
                                   });
 
@@ -4487,59 +4853,64 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+
+  String _getGreeting() {
+    final hour = DateTime.now().hour;
+    if (hour < 12) return 'Good Morning,';
+    if (hour < 17) return 'Good Afternoon,';
+    return 'Good Evening,';
+  }
+
+  String _resolveHomeUserName(Map<String, dynamic>? userData) {
+    final fromDoc = (userData?['name'] as String? ?? '').trim();
+    if (fromDoc.isNotEmpty) {
+      AppPrefs.setUserName(fromDoc);
+      return fromDoc.split(' ').first;
+    }
+    final fromAuth = (FirebaseAuth.instance.currentUser?.displayName ?? '').trim();
+    if (fromAuth.isNotEmpty) {
+      AppPrefs.setUserName(fromAuth);
+      return fromAuth.split(' ').first;
+    }
+    final cached = AppPrefs.getUserName().trim();
+    if (cached.isNotEmpty) {
+      return cached.split(' ').first;
+    }
+    return 'User';
+  }
+
   /// Shimmer skeleton shown while the first data load is in progress
   Widget _buildShimmerList() {
-    return ListView.builder(
-      itemCount: 4,
-      physics: const NeverScrollableScrollPhysics(),
-      itemBuilder: (context, _) {
+    return Column(
+      children: List.generate(4, (_) {
         return Shimmer.fromColors(
-          baseColor: Colors.grey[850] ?? const Color(0xFF212121),
-          highlightColor: Colors.grey[750] ?? const Color(0xFF424242),
-          child: Card(
-            margin: const EdgeInsets.only(bottom: 12),
-            color: Colors.grey[850],
-            child: ListTile(
-              leading: CircleAvatar(
-                radius: 22,
-                backgroundColor: Colors.grey[800],
-              ),
-              title: Container(
-                height: 14,
-                width: 120,
-                decoration: BoxDecoration(
-                  color: Colors.grey[800],
-                  borderRadius: BorderRadius.circular(6),
+          baseColor: const Color(0xFFE5E7EB),
+          highlightColor: const Color(0xFFF3F4F6),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: AppColors.borderLight, width: 0.8),
+            ),
+            child: Row(
+              children: [
+                const CircleAvatar(radius: 20, backgroundColor: Color(0xFFE5E7EB)),
+                const SizedBox(width: 14),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(height: 14, width: 120, decoration: BoxDecoration(color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(4))),
+                    const SizedBox(height: 6),
+                    Container(height: 11, width: 80, decoration: BoxDecoration(color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(4))),
+                  ],
                 ),
-              ),
-              subtitle: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 8),
-                  Container(
-                    height: 12,
-                    width: 90,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[800],
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Container(
-                    height: 11,
-                    width: 60,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[800],
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                ],
-              ),
-              isThreeLine: true,
+              ],
             ),
           ),
         );
-      },
+      }),
     );
   }
 
@@ -4560,603 +4931,799 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       friends = rawFriends;
     }
 
+    final currentUser = FirebaseAuth.instance.currentUser;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return Scaffold(
+      backgroundColor: isDark ? AppColors.backgroundDark : AppColors.background,
       resizeToAvoidBottomInset: false,
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(56),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                // Drawer Menu button
-                Builder(
-                  builder: (context) => IconButton(
-                    icon: const Icon(Icons.menu, size: 24, color: Colors.white),
-                    onPressed: () => Scaffold.of(context).openDrawer(),
-                  ),
-                ),
-                // Add Friend button
-                IconButton(
-                  icon: const Icon(Icons.person_add_rounded, size: 24, color: Colors.white),
-                  onPressed: openAddFriendPage,
-                  tooltip: 'Add Friend',
-                ),
-              ],
+      drawer: const AppDrawer(currentRoute: 'dashboard'),
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          height: 62,
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: isDark ? AppColors.surfaceDark : Colors.white,
+            borderRadius: BorderRadius.circular(32),
+            border: Border.all(
+              color: isDark ? AppColors.borderDark : AppColors.borderLight,
+              width: 0.8,
             ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.06),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              IconButton(
+                icon: Icon(
+                  Icons.home_rounded,
+                  color: isDark ? Colors.white : AppColors.textPrimary,
+                  size: 24,
+                ),
+                onPressed: () {},
+                tooltip: 'Home',
+              ),
+              IconButton(
+                icon: Icon(
+                  Icons.receipt_long_rounded,
+                  color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                  size: 24,
+                ),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const DailyExpenditureScreen()),
+                  ).then((_) => loadExpenses());
+                },
+                tooltip: 'Daily Expenditure',
+              ),
+              // Center FAB
+              GestureDetector(
+                onTap: () async {
+                  final result = await Navigator.push(
+                    context,
+                    _smoothRoute((_) => const AddPage()),
+                  );
+                  if (result == true) {
+                    await refreshDashboard();
+                  }
+                },
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF27272A) : AppColors.darkCard,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.add_rounded, color: Colors.white, size: 24),
+                ),
+              ),
+              IconButton(
+                icon: Icon(
+                  Icons.bar_chart_rounded,
+                  color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                  size: 24,
+                ),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const ReportsScreen()),
+                  );
+                },
+                tooltip: 'Reports',
+              ),
+              // 5. User Profile Photo (replaces Profile icon)
+              GestureDetector(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const ProfilePage()),
+                  );
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(6.0),
+                  child: currentUser != null
+                      ? StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                          stream: FirebaseFirestore.instance
+                              .collection('users')
+                              .doc(currentUser.uid)
+                              .snapshots(),
+                          builder: (context, snapshot) {
+                            final data = snapshot.hasData ? snapshot.data!.data() : null;
+                            final photoUrl = data?['photoUrl'] as String? ?? currentUser.photoURL ?? '';
+                            return Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                                  width: 1.0,
+                                ),
+                              ),
+                              child: CircleAvatar(
+                                radius: 13,
+                                backgroundColor: isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant,
+                                child: photoUrl.isNotEmpty
+                                    ? ClipOval(
+                                        child: CustomCachedImage(
+                                          url: photoUrl,
+                                          width: 26,
+                                          height: 26,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      )
+                                    : Icon(
+                                        Icons.person_outline_rounded,
+                                        color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                                        size: 17,
+                                      ),
+                              ),
+                            );
+                          },
+                        )
+                      : Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                              width: 1.0,
+                            ),
+                          ),
+                          child: CircleAvatar(
+                            radius: 13,
+                            backgroundColor: isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant,
+                            child: Icon(
+                              Icons.person_outline_rounded,
+                              color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                              size: 17,
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
-      drawer: const AppDrawer(currentRoute: 'dashboard'),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: Colors.green,
-        onPressed: () async {
-          final result = await Navigator.push(
-            context,
-            _smoothRoute((_) => const AddPage()),
-          );
-          if (result == true) {
-            await refreshDashboard();
-          }
-        },
-        child: const Icon(Icons.add),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final cardWidth = (constraints.maxWidth - 12) / 2;
-                final cardHeight = cardWidth / 1.9;
-                final gridHeight = (cardHeight * 2) + 12;
-                return SizedBox(
-                  height: gridHeight,
-                  child: GridView.count(
-                    padding: EdgeInsets.zero,
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    crossAxisCount: 2,
-                    crossAxisSpacing: 12,
-                    mainAxisSpacing: 12,
-                    childAspectRatio: 1.9,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(14),
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: syncBankBalance,
+          color: AppColors.darkCard,
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Top App Bar
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    IconButton(
+                      icon: Icon(
+                        Icons.settings_outlined,
+                        size: 24,
+                        color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                      ),
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                        );
+                      },
+                      tooltip: 'Settings',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                    InkWell(
+                      onTap: openAddFriendPage,
+                      borderRadius: BorderRadius.circular(20),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                         decoration: BoxDecoration(
-                          color: Colors.green.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: Colors.green.withValues(alpha: 0.3),
-                            width: 1.5,
-                          ),
+                          color: isDark ? const Color(0xFF27272A) : AppColors.darkCard,
+                          borderRadius: BorderRadius.circular(20),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.green.withValues(alpha: 0.08),
+                              color: Colors.black.withValues(alpha: 0.08),
                               blurRadius: 8,
-                              spreadRadius: 1,
+                              offset: const Offset(0, 2),
                             ),
                           ],
                         ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Text(
-                              "COLLECT",
+                            Icon(Icons.person_add_rounded, size: 18, color: Colors.white),
+                            SizedBox(width: 6),
+                            Text(
+                              'Add Friend',
                               style: TextStyle(
-                                fontWeight: FontWeight.bold,
                                 color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    "\u20B9${formatAmount(totalToGet)}",
-                                    style: const TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ),
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
                               ),
                             ),
                           ],
                         ),
                       ),
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: Colors.red.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: Colors.red.withValues(alpha: 0.3),
-                            width: 1.5,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+
+                // Greeting & Name Header
+                StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                  stream: currentUser != null
+                      ? FirebaseFirestore.instance
+                          .collection('users')
+                          .doc(currentUser.uid)
+                          .snapshots()
+                      : null,
+                  builder: (context, snapshot) {
+                    final data = snapshot.hasData ? snapshot.data!.data() : null;
+                    final resolvedName = _resolveHomeUserName(data);
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _getGreeting(),
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.red.withValues(alpha: 0.08),
-                              blurRadius: 8,
-                              spreadRadius: 1,
-                            ),
-                          ],
                         ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                        const SizedBox(height: 2),
+                        Row(
                           children: [
-                            const Text(
-                              "PAY",
+                            Text(
+                              resolvedName,
                               style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
+                                fontSize: 26,
+                                fontWeight: FontWeight.w800,
+                                color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                                letterSpacing: -0.5,
                               ),
                             ),
-                            const SizedBox(height: 8),
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    "\u20B9${formatAmount(totalToGive)}",
-                                    style: const TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
+                            const SizedBox(width: 6),
+                            const Text("👋", style: TextStyle(fontSize: 22)),
                           ],
                         ),
-                      ),
-                      GestureDetector(
-                        onTap: showBankBalanceDialog,
+                        const SizedBox(height: 2),
+                        Text(
+                          "Keep track. Stay sorted.",
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
+
+                // Collect & Pay Cards
+                Row(
+                  children: [
+                    // Collect Card
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _selectedFilter = _selectedFilter == 'Collect' ? 'All' : 'Collect';
+                          });
+                        },
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                          padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
-                            color: Colors.blue.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(16),
+                            color: isDark ? const Color(0xFF0F1B14) : AppColors.collectBg,
+                            borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: Colors.blue.withValues(alpha: 0.3),
-                              width: 1.5,
+                              color: _selectedFilter == 'Collect'
+                                  ? (isDark ? const Color(0xFF10B981) : AppColors.collectText)
+                                  : (isDark ? const Color(0xFF1B3624) : AppColors.collectBg),
+                              width: 1.2,
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.blue.withValues(alpha: 0.08),
-                                blurRadius: 8,
-                                spreadRadius: 1,
-                              ),
-                            ],
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: const [
-                                  Text(
-                                    "BANK BALANCE",
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(6),
+                                    decoration: BoxDecoration(
+                                      color: isDark ? const Color(0xFF1A3323) : AppColors.collectBadge,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      Icons.call_received_rounded,
+                                      color: isDark ? const Color(0xFF34D399) : AppColors.collectText,
+                                      size: 15,
                                     ),
                                   ),
-                                  Icon(
-                                    Icons.edit_outlined,
-                                    size: 14,
-                                    color: Colors.white70,
+                                  const Icon(
+                                    Icons.chevron_right_rounded,
+                                    color: AppColors.textMuted,
+                                    size: 18,
                                   ),
                                 ],
                               ),
-                              const SizedBox(height: 2),
-                              Expanded(
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    alignment: Alignment.centerLeft,
-                                    child: TweenAnimationBuilder<double>(
-                                      tween: Tween<double>(begin: _oldBankBalance, end: bankBalance),
-                                      duration: const Duration(milliseconds: 600),
-                                      curve: Curves.easeOutCubic,
-                                      builder: (context, value, child) {
-                                        return Text(
-                                          "\u20B9${formatAmount(value)}",
-                                          style: const TextStyle(
-                                            fontSize: 24,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.white,
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
+                              const SizedBox(height: 10),
+                              Text(
+                                "Collect",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark ? const Color(0xFF34D399) : AppColors.textSecondary,
                                 ),
                               ),
                               const SizedBox(height: 2),
-                              const Text(
-                                "Tap to Edit",
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  color: Colors.white70,
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  "₹${formatAmount(totalToGet)}",
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    color: isDark ? Colors.white : AppColors.textPrimary,
+                                    letterSpacing: -0.4,
+                                  ),
                                 ),
                               ),
                             ],
                           ),
                         ),
                       ),
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: Colors.amber.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: Colors.amber.withValues(alpha: 0.3),
-                            width: 1.5,
+                    ),
+                    const SizedBox(width: 12),
+                    // Pay Card
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _selectedFilter = _selectedFilter == 'Pay' ? 'All' : 'Pay';
+                          });
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: isDark ? const Color(0xFF1F1215) : AppColors.payBg,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: _selectedFilter == 'Pay'
+                                  ? (isDark ? const Color(0xFFEF4444) : AppColors.payText)
+                                  : (isDark ? const Color(0xFF3B1E23) : AppColors.payBg),
+                              width: 1.2,
+                            ),
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.amber.withValues(alpha: 0.08),
-                              blurRadius: 8,
-                              spreadRadius: 1,
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              "NET BALANCE",
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    "\u20B9${formatAmount(netWorth)}",
-                                    style: const TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(6),
+                                    decoration: BoxDecoration(
+                                      color: isDark ? const Color(0xFF3B1E23) : AppColors.payBadge,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      Icons.call_made_rounded,
+                                      color: isDark ? const Color(0xFFF87171) : AppColors.payText,
+                                      size: 15,
                                     ),
                                   ),
+                                  const Icon(
+                                    Icons.chevron_right_rounded,
+                                    color: AppColors.textMuted,
+                                    size: 18,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                "Pay",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark ? const Color(0xFFF87171) : AppColors.textSecondary,
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 10),
-            // Personal Spending Card
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.grey[900],
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: Colors.grey[850] ?? const Color(0xFF212121),
-                  width: 1.5,
-                ),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          "PERSONAL SPENDING",
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.amber,
-                            letterSpacing: 1,
+                              const SizedBox(height: 2),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  "₹${formatAmount(totalToGive)}",
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    color: isDark ? Colors.white : AppColors.textPrimary,
+                                    letterSpacing: -0.4,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  "Today",
-                                  style: TextStyle(color: Colors.grey, fontSize: 11),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  "\u20B9${todayHomeSpending.toStringAsFixed(0)}",
-                                  style: const TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(width: 24),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  "This Month",
-                                  style: TextStyle(color: Colors.grey, fontSize: 11),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  "\u20B9${monthHomeSpending.toStringAsFixed(0)}",
-                                  style: const TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+
+                // Net Balance Hero Card (Two balanced columns: Bank Balance Left, Net Balance Right)
+                GestureDetector(
+                  onTap: showBankBalanceDialog,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF181B22) : AppColors.darkCard,
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(
+                        color: isDark ? AppColors.borderDark : Colors.transparent,
+                        width: isDark ? 0.8 : 0,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.12),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3),
                         ),
                       ],
                     ),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const DailyExpenditureScreen(),
-                        ),
-                      ).then((_) => loadExpenses());
-                    },
-                    style: TextButton.styleFrom(
-                      foregroundColor: Colors.amber,
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
+                    child: Row(
                       children: [
-                        Text(
-                          "View Details",
-                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        // LEFT: Bank Balance
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Row(
+                                children: [
+                                  Text(
+                                    "Bank Balance",
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                  SizedBox(width: 4),
+                                  Icon(
+                                    Icons.edit_outlined,
+                                    size: 12,
+                                    color: Colors.white54,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  "₹${formatAmount(bankBalance)}",
+                                  style: const TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white,
+                                    letterSpacing: -0.5,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              const Text(
+                                "Tap to edit",
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.white54,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                        Icon(Icons.chevron_right, size: 16),
+                        // CENTER: Subtle vertical divider
+                        Container(
+                          width: 1,
+                          height: 48,
+                          margin: const EdgeInsets.symmetric(horizontal: 14),
+                          color: Colors.white24,
+                        ),
+                        // RIGHT: Net Balance
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                "Net Balance",
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  "₹${formatAmount(netWorth)}",
+                                  style: const TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white,
+                                    letterSpacing: -0.5,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                netWorth >= 0 ? "You're in plus" : "You owe overall",
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: netWorth >= 0 ? const Color(0xFF6EE7B7) : const Color(0xFFFCA5A5),
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ],
                     ),
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: ['All', 'Collect', 'Pay', 'Settled'].map((filter) {
-                final isSelected = _selectedFilter == filter;
-                return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        _selectedFilter = filter;
-                      });
-                    },
-                    child: Container(
-                      height: 32,
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      decoration: BoxDecoration(
-                        color: isSelected ? Colors.amber : Colors.grey[900],
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: isSelected
-                              ? Colors.amber
-                              : Colors.grey[800]?.withValues(alpha: 0.5) ?? const Color(0x80424242),
-                          width: 1,
+                ),
+                const SizedBox(height: 14),
+
+                // Filter Pills (Centered)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: ['All', 'Collect', 'Pay', 'Settled'].map((filter) {
+                    final isSelected = _selectedFilter == filter;
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _selectedFilter = filter;
+                          });
+                        },
+                        child: Container(
+                          height: 32,
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? (isDark ? Colors.white : AppColors.darkCard)
+                                : (isDark ? AppColors.surfaceDark : Colors.white),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: isSelected
+                                  ? (isDark ? Colors.white : AppColors.darkCard)
+                                  : (isDark ? AppColors.borderDark : AppColors.borderLight),
+                              width: 0.8,
+                            ),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            filter,
+                            style: TextStyle(
+                              color: isSelected
+                                  ? (isDark ? Colors.black : Colors.white)
+                                  : (isDark ? AppColors.textSecondaryDark : AppColors.textSecondary),
+                              fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                              fontSize: 12,
+                            ),
+                          ),
                         ),
                       ),
-                      alignment: Alignment.center,
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 12),
+
+                // Friends List as part of the continuous vertical scroll!
+                if (_isInitialLoad)
+                  _buildShimmerList()
+                else if (friends.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 40),
+                    child: Center(
                       child: Text(
-                        filter,
+                        _selectedFilter == 'All'
+                            ? "No friends added yet. Tap '+' to add a transaction."
+                            : "No friends found under '$_selectedFilter'.",
                         style: TextStyle(
-                          color: isSelected ? Colors.black : Colors.white70,
-                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                          fontSize: 12,
+                          color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                          fontSize: 13,
                         ),
                       ),
                     ),
-                  ),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: syncBankBalance,
-                color: Colors.amber,
-                child: _isInitialLoad
-                    ? _buildShimmerList()
-                    : friends.isEmpty
-                    ? ListView(
-                        // Wrapping in a ListView so pull-to-refresh works even on empty state
-                        children: [
-                          const SizedBox(height: 80),
-                          Center(
-                            child: Text(
-                              _selectedFilter == 'All'
-                                  ? "No friends added yet. Tap '+' to add a transaction."
-                                  : "No friends found under '$_selectedFilter'.",
-                              style: const TextStyle(color: Colors.grey),
-                            ),
+                  )
+                else
+                  ...friends.map((friend) {
+                    final friendName = friend.name;
+                    final balance = getFriendBalance(friendName);
+                    final String status;
+                    final Color statusColor;
+                    if (balance > 0) {
+                      status = "Collect";
+                      statusColor = AppColors.collectText;
+                    } else if (balance < 0) {
+                      status = "Pay";
+                      statusColor = AppColors.payText;
+                    } else {
+                      status = "Settled";
+                      statusColor = isDark ? AppColors.textSecondaryDark : AppColors.settledText;
+                    }
+
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      decoration: BoxDecoration(
+                        color: isDark ? AppColors.surfaceDark : Colors.white,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: isDark ? AppColors.borderDark : AppColors.borderLight,
+                          width: 0.8,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                            blurRadius: 6,
+                            offset: const Offset(0, 2),
                           ),
                         ],
-                      )
-                    : ListView.builder(
-                        itemCount: friends.length,
-                        itemBuilder: (context, index) {
-                          final friend = friends[index];
-                          final friendName = friend.name;
-                          final balance = getFriendBalance(friendName);
-                          final String status;
-                          final Color statusColor;
-                          if (balance > 0) {
-                            status = "Collect";
-                            statusColor = Colors.green;
-                          } else if (balance < 0) {
-                            status = "Pay";
-                            statusColor = Colors.red;
-                          } else {
-                            status = "Settled";
-                            statusColor = Colors.grey;
-                          }
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(12),
-                              onTap: () async {
-                                await Navigator.push(
-                                  context,
-                                  _smoothRoute((_) => PersonDetailPage(
-                                    friendName: friendName,
-                                    peerUserId: friend.uid,
-                                  )),
-                                );
-                                await refreshDashboard();
-                              },
-                              onLongPress: () {
-                                deleteEntireFriend(friend);
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                                child: Row(
-                                  children: [
-                                    (() {
-                                      final cached = cachedFriendProfiles[friend.uid];
-                                      final photoUrl = cached?['photoUrl'] as String?;
-                                      if (photoUrl != null && photoUrl.isNotEmpty) {
-                                        return CircleAvatar(
-                                          backgroundColor: Colors.transparent,
-                                          child: ClipOval(
-                                            child: CustomCachedImage(
-                                              url: photoUrl,
-                                              width: 40,
-                                              height: 40,
-                                              fit: BoxFit.cover,
-                                            ),
-                                          ),
-                                        );
-                                      }
-                                      final Color placeholderColor;
-                                      if (balance > 0) {
-                                        placeholderColor = Colors.green;
-                                      } else if (balance < 0) {
-                                        placeholderColor = Colors.red;
-                                      } else {
-                                        placeholderColor = Colors.grey;
-                                      }
-                                      return CircleAvatar(
-                                        backgroundColor: placeholderColor.withValues(alpha: 0.2),
-                                        child: Text(
-                                          friend.displayName.isNotEmpty
-                                              ? friend.displayName[0].toUpperCase()
-                                              : '?',
-                                          style: TextStyle(
-                                            color: placeholderColor,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      );
-                                    })(),
-                                    const SizedBox(width: 16),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        mainAxisSize: MainAxisSize.min,
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                          Text(
-                                            friend.displayName,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 16,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 6),
-                                          FittedBox(
-                                            fit: BoxFit.scaleDown,
-                                            alignment: Alignment.centerLeft,
-                                            child: Text(
-                                              "Net Amount: \u20B9${formatAmount(balance.abs())}",
-                                              style: TextStyle(
-                                                color: statusColor,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            "Status: $status",
-                                            style: TextStyle(
-                                              color: statusColor,
-                                              fontWeight: FontWeight.w500,
-                                            ),
-                                          ),
-                                        ],
+                      ),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(18),
+                        onTap: () async {
+                          await Navigator.push(
+                            context,
+                            _smoothRoute((_) => PersonDetailPage(
+                              friendName: friendName,
+                              peerUserId: friend.uid,
+                            )),
+                          );
+                          await refreshDashboard();
+                        },
+                        onLongPress: () {
+                          deleteEntireFriend(friend);
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                          child: Row(
+                            children: [
+                              (() {
+                                final cached = cachedFriendProfiles[friend.uid];
+                                final photoUrl = cached?['photoUrl'] as String?;
+                                if (photoUrl != null && photoUrl.isNotEmpty) {
+                                  return CircleAvatar(
+                                    radius: 20,
+                                    backgroundColor: Colors.transparent,
+                                    child: ClipOval(
+                                      child: CustomCachedImage(
+                                        url: photoUrl,
+                                        width: 40,
+                                        height: 40,
+                                        fit: BoxFit.cover,
                                       ),
                                     ),
-                                    const SizedBox(width: 16),
+                                  );
+                                }
+                                final Color placeholderColor;
+                                final Color placeholderBg;
+                                if (balance > 0) {
+                                  placeholderColor = AppColors.collectText;
+                                  placeholderBg = isDark ? const Color(0xFF064E3B).withValues(alpha: 0.3) : AppColors.collectBg;
+                                } else if (balance < 0) {
+                                  placeholderColor = AppColors.payText;
+                                  placeholderBg = isDark ? const Color(0xFF7F1D1D).withValues(alpha: 0.3) : AppColors.payBg;
+                                } else {
+                                  placeholderColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+                                  placeholderBg = isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant;
+                                }
+                                return CircleAvatar(
+                                  radius: 20,
+                                  backgroundColor: placeholderBg,
+                                  child: Text(
+                                    friend.displayName.isNotEmpty
+                                        ? friend.displayName[0].toUpperCase()
+                                        : '?',
+                                    style: TextStyle(
+                                      color: placeholderColor,
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 15,
+                                    ),
+                                  ),
+                                );
+                              })(),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      friend.displayName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 15,
+                                        color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
                                     Row(
-                                      mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        GlassActionButton(
-                                          icon: Icons.add,
-                                          color: Colors.green,
-                                          tooltip: "Give Money (+)",
-                                          onPressed: () {
-                                            quickAddTransaction(friendName, true);
-                                          },
+                                        Text(
+                                          "Net: ₹${formatAmount(balance.abs())}",
+                                          style: TextStyle(
+                                            color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
+                                            fontWeight: FontWeight.w500,
+                                            fontSize: 12,
+                                          ),
                                         ),
-                                        const SizedBox(width: 12),
-                                        GlassActionButton(
-                                          icon: Icons.remove,
-                                          color: Colors.red,
-                                          tooltip: "Take Money (-)",
-                                          onPressed: () {
-                                            quickAddTransaction(friendName, false);
-                                          },
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          "• $status",
+                                          style: TextStyle(
+                                            color: statusColor,
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 12,
+                                          ),
                                         ),
                                       ],
                                     ),
                                   ],
                                 ),
                               ),
-                            ),
-                          );
-                        },
+                              const SizedBox(width: 10),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  GlassActionButton(
+                                    icon: Icons.add,
+                                    color: AppColors.collectText,
+                                    tooltip: "Give Money (+)",
+                                    onPressed: () {
+                                      quickAddTransaction(friendName, true);
+                                    },
+                                  ),
+                                  const SizedBox(width: 8),
+                                  GlassActionButton(
+                                    icon: Icons.remove,
+                                    color: AppColors.payText,
+                                    tooltip: "Take Money (-)",
+                                    onPressed: () {
+                                      quickAddTransaction(friendName, false);
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-              ),
+                    );
+                  }),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -5368,101 +5935,185 @@ class _AddPageState extends State<AddPage> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final hintColor = isDark ? AppColors.textMutedDark : AppColors.textMuted;
+    final iconColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final cardBg = isDark ? AppColors.surfaceDark : Colors.white;
+    final cardBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
+
     return Scaffold(
+      backgroundColor: isDark ? AppColors.backgroundDark : AppColors.background,
       appBar: AppBar(
         title: Text(
           widget.transaction == null ? "Add Transaction" : "Edit Transaction",
+          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18, color: textColor),
+        ),
+        centerTitle: true,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios_new_rounded, color: textColor, size: 20),
+          onPressed: () => Navigator.pop(context),
         ),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: SingleChildScrollView(
-          child: Column(
-            children: [
-              TextField(
-                controller: friendController,
-                decoration: const InputDecoration(labelText: "Friend Name"),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: friendController,
+              style: TextStyle(color: textColor, fontWeight: FontWeight.w500),
+              decoration: InputDecoration(
+                hintText: "Friend Name",
+                hintStyle: TextStyle(color: hintColor),
+                prefixIcon: Icon(Icons.person_outline_rounded, size: 20, color: iconColor),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: amountController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: "Amount"),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: amountController,
+              keyboardType: TextInputType.number,
+              style: TextStyle(color: textColor, fontWeight: FontWeight.w700, fontSize: 16),
+              decoration: InputDecoration(
+                hintText: "Amount",
+                hintStyle: TextStyle(color: hintColor),
+                prefixIcon: Icon(Icons.currency_rupee_rounded, size: 20, color: iconColor),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: noteController,
-                decoration: const InputDecoration(labelText: "Note"),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: noteController,
+              style: TextStyle(color: textColor, fontWeight: FontWeight.w500),
+              decoration: InputDecoration(
+                hintText: "Note",
+                hintStyle: TextStyle(color: hintColor),
+                prefixIcon: Icon(Icons.description_outlined, size: 20, color: iconColor),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: dateController,
-                readOnly: true,
-                onTap: pickDate,
-                decoration: const InputDecoration(
-                  labelText: "Date",
-                  suffixIcon: Icon(Icons.calendar_month),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: dateController,
+              readOnly: true,
+              onTap: pickDate,
+              style: TextStyle(color: textColor, fontWeight: FontWeight.w500),
+              decoration: InputDecoration(
+                hintText: "Date",
+                hintStyle: TextStyle(color: hintColor),
+                prefixIcon: Icon(Icons.calendar_today_outlined, size: 18, color: iconColor),
+                suffixIcon: Icon(Icons.calendar_month_rounded, size: 20, color: iconColor),
+              ),
+            ),
+            const SizedBox(height: 20),
+            ReceiptAttachmentSection(
+              receiptImage: receiptImage,
+              receiptUploadProgress: receiptUploadProgress,
+              existingReceiptPath: existingReceiptPath,
+              existingReceiptUrl: existingReceiptUrl,
+              isReceiptRemoved: isReceiptRemoved,
+              onRemoveExisting: () {
+                _receiptLog('AddPage.pickReceipt', 'Existing receipt removed.');
+                setState(() {
+                  isReceiptRemoved = true;
+                });
+              },
+              onPick: (source) async {
+                final result = await _pickReceiptImage(
+                  source: source,
+                  scope: 'AddPage.pickReceipt',
+                );
+                if (result == null || !mounted) {
+                  return;
+                }
+                setState(() {
+                  receiptImage = result;
+                  isReceiptRemoved = true;
+                });
+              },
+              onClear: () {
+                _receiptLog('AddPage.pickReceipt', 'Receipt cleared.');
+                setState(() {
+                  receiptImage = null;
+                  receiptUploadProgress = 0;
+                });
+              },
+            ),
+            const SizedBox(height: 20),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: cardBg,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: cardBorder, width: 0.8),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: iGave
+                          ? (isDark ? AppColors.collectBgDark : AppColors.collectBg)
+                          : (isDark ? AppColors.payBgDark : AppColors.payBg),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      iGave ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+                      color: iGave ? AppColors.collectText : AppColors.payText,
+                      size: 18,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      iGave ? "I Gave Money" : "I Took Money",
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: textColor,
+                      ),
+                    ),
+                  ),
+                  Switch.adaptive(
+                    value: iGave,
+                    activeTrackColor: isDark ? AppColors.collectText : AppColors.darkCard,
+                    activeThumbColor: Colors.white,
+                    inactiveTrackColor: isDark ? AppColors.surfaceVariantDark : AppColors.borderLight,
+                    onChanged: (value) {
+                      setState(() {
+                        iGave = value;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 28),
+            SizedBox(
+              width: double.infinity,
+              height: 54,
+              child: ElevatedButton(
+                onPressed: saveTransaction,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: isDark ? Colors.white : AppColors.darkCard,
+                  foregroundColor: isDark ? AppColors.darkCard : Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  elevation: 0,
                 ),
-              ),
-              const SizedBox(height: 16),
-              ReceiptAttachmentSection(
-                receiptImage: receiptImage,
-                receiptUploadProgress: receiptUploadProgress,
-                existingReceiptPath: existingReceiptPath,
-                existingReceiptUrl: existingReceiptUrl,
-                isReceiptRemoved: isReceiptRemoved,
-                onRemoveExisting: () {
-                  _receiptLog('AddPage.pickReceipt', 'Existing receipt removed.');
-                  setState(() {
-                    isReceiptRemoved = true;
-                  });
-                },
-                onPick: (source) async {
-                  final result = await _pickReceiptImage(
-                    source: source,
-                    scope: 'AddPage.pickReceipt',
-                  );
-                  if (result == null || !mounted) {
-                    return;
-                  }
-                  setState(() {
-                    receiptImage = result;
-                    isReceiptRemoved = true;
-                  });
-                },
-                onClear: () {
-                  _receiptLog('AddPage.pickReceipt', 'Receipt cleared.');
-                  setState(() {
-                    receiptImage = null;
-                    receiptUploadProgress = 0;
-                  });
-                },
-              ),
-              const SizedBox(height: 16),
-              SwitchListTile(
-                title: Text(iGave ? "I Gave Money" : "I Took Money"),
-                value: iGave,
-                onChanged: (value) {
-                  setState(() {
-                    iGave = value;
-                  });
-                },
-              ),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: double.infinity,
-                height: 55,
-                child: ElevatedButton(
-                  onPressed: saveTransaction,
-                  child: Text(
-                    widget.transaction == null
-                        ? "Save Transaction"
-                        : "Update Transaction",
+                child: Text(
+                  widget.transaction == null
+                      ? "Save Transaction"
+                      : "Update Transaction",
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: isDark ? AppColors.darkCard : Colors.white,
                   ),
                 ),
               ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 20),
+          ],
         ),
       ),
     );
@@ -5560,7 +6211,8 @@ class TransactionDetailPage extends StatelessWidget {
     return null;
   }
 
-  Widget _detailRow(String label, String value) {
+  Widget _detailRow(BuildContext context, String label, String value) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -5570,8 +6222,8 @@ class TransactionDetailPage extends StatelessWidget {
             width: 110,
             child: Text(
               label,
-              style: const TextStyle(
-                color: Colors.grey,
+              style: TextStyle(
+                color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondary,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -5579,7 +6231,10 @@ class TransactionDetailPage extends StatelessWidget {
           Expanded(
             child: Text(
               value,
-              style: const TextStyle(fontWeight: FontWeight.w500),
+              style: TextStyle(
+                color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimary,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ],
@@ -5589,8 +6244,17 @@ class TransactionDetailPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final cardBg = isDark ? AppColors.surfaceDark : Colors.white;
+    final cardBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final dividerCol = isDark ? AppColors.dividerDark : AppColors.divider;
+
     final isGiven = _transactionDisplayIsGiven(transaction);
-    final amountColor = isGiven ? Colors.green : Colors.red;
+    final amountColor = isGiven ? AppColors.collectText : AppColors.payText;
+    final statusBg = isGiven
+        ? (isDark ? AppColors.collectBgDark : AppColors.collectBg)
+        : (isDark ? AppColors.payBgDark : AppColors.payBg);
     final receiptWidget = _buildReceiptWidget(context);
     final statusText = isGiven ? 'Collect' : 'Pay';
     final displayFriendName = _transactionDisplayFriendName(transaction);
@@ -5598,13 +6262,21 @@ class TransactionDetailPage extends StatelessWidget {
     final isCreator = transaction.createdBy == currentUser;
 
     return Scaffold(
+      backgroundColor: isDark ? AppColors.backgroundDark : AppColors.background,
       appBar: AppBar(
-        title: const Text('Transaction Details'),
+        title: Text(
+          'Transaction Details',
+          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18, color: textColor),
+        ),
         centerTitle: true,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios_new_rounded, color: textColor, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
         actions: [
           if (isCreator) ...[
             IconButton(
-              icon: const Icon(Icons.edit),
+              icon: Icon(Icons.edit_outlined, color: textColor),
               tooltip: 'Edit',
               onPressed: () async {
                 final result = await Navigator.push(
@@ -5617,7 +6289,7 @@ class TransactionDetailPage extends StatelessWidget {
               },
             ),
             IconButton(
-              icon: const Icon(Icons.delete, color: Colors.red),
+              icon: const Icon(Icons.delete_outline_rounded, color: AppColors.payText),
               tooltip: 'Delete',
               onPressed: () async {
                 final confirmed = await showDialog<bool>(
@@ -5658,36 +6330,59 @@ class TransactionDetailPage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Card(
-              color: Colors.grey[900],
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: cardBg,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: cardBorder, width: 0.8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      displayFriendName,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                      ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    displayFriendName,
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: textColor,
                     ),
-                    const SizedBox(height: 8),
-                    Text('Status: $statusText', style: TextStyle(color: amountColor)),
-                    const SizedBox(height: 16),
-                    Text(
-                      '\u20B9${transaction.amount.toStringAsFixed(0)}',
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: statusBg,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      'Status: $statusText',
                       style: TextStyle(
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
                         color: amountColor,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '₹${transaction.amount.toStringAsFixed(0)}',
+                    style: TextStyle(
+                      fontSize: 34,
+                      fontWeight: FontWeight.w800,
+                      color: amountColor,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                ],
               ),
             ),
             if (receiptWidget != null) ...[
@@ -5695,28 +6390,38 @@ class TransactionDetailPage extends StatelessWidget {
               receiptWidget,
               const SizedBox(height: 16),
             ],
-            Card(
-              color: Colors.grey[900],
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: cardBg,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: cardBorder, width: 0.8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Transaction Info',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Transaction Info',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: textColor,
                     ),
-                    const SizedBox(height: 8),
-                    _detailRow('Date', transaction.date),
-                    _detailRow('Note', transaction.note),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: 12),
+                  _detailRow(context, 'Date', transaction.date),
+                  Divider(color: dividerCol, height: 16),
+                  _detailRow(context, 'Note', transaction.note.isEmpty ? '-' : transaction.note),
+                ],
               ),
             ),
           ],
@@ -6084,17 +6789,34 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   void _showTransactionOptions(BuildContext context, TransactionModel t) {
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
     final isCreator = t.createdBy == currentUid;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final borderCol = isDark ? AppColors.borderDark : AppColors.borderLight;
+
     showModalBottomSheet(
       context: context,
+      backgroundColor: isDark ? AppColors.surfaceDark : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (_) {
         return SafeArea(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Container(
+                margin: const EdgeInsets.only(top: 10, bottom: 6),
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: borderCol,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
               if (isCreator)
                 ListTile(
-                  leading: const Icon(Icons.edit),
-                  title: const Text("Edit"),
+                  leading: Icon(Icons.edit_outlined, color: textColor),
+                  title: Text("Edit", style: TextStyle(color: textColor, fontWeight: FontWeight.w500)),
                   onTap: () async {
                     Navigator.pop(context);
                     final result = await Navigator.push(
@@ -6108,8 +6830,8 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                   },
                 ),
               ListTile(
-                leading: const Icon(Icons.cleaning_services),
-                title: const Text("Clear Transaction"),
+                leading: Icon(Icons.cleaning_services_outlined, color: textColor),
+                title: Text("Clear Transaction", style: TextStyle(color: textColor, fontWeight: FontWeight.w500)),
                 onTap: () async {
                   Navigator.pop(context);
                   if (t.firebaseId != null) {
@@ -6125,10 +6847,10 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
               ),
               if (isCreator)
                 ListTile(
-                  leading: const Icon(Icons.delete, color: Colors.red),
+                  leading: const Icon(Icons.delete_outline, color: AppColors.payText),
                   title: const Text(
                     "Delete",
-                    style: TextStyle(color: Colors.red),
+                    style: TextStyle(color: AppColors.payText, fontWeight: FontWeight.w500),
                   ),
                   onTap: () async {
                     Navigator.pop(context);
@@ -6154,16 +6876,33 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
     BuildContext context,
     DeletedEntryModel entry,
   ) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final borderCol = isDark ? AppColors.borderDark : AppColors.borderLight;
+
     showModalBottomSheet(
       context: context,
+      backgroundColor: isDark ? AppColors.surfaceDark : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (_) {
         return SafeArea(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Container(
+                margin: const EdgeInsets.only(top: 10, bottom: 6),
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: borderCol,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
               ListTile(
-                leading: const Icon(Icons.restore),
-                title: const Text("Restore Transaction"),
+                leading: Icon(Icons.restore, color: textColor),
+                title: Text("Restore Transaction", style: TextStyle(color: textColor, fontWeight: FontWeight.w500)),
                 onTap: () async {
                   Navigator.pop(context);
                   if (entry.firebaseId != null) {
@@ -6180,10 +6919,10 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                 },
               ),
               ListTile(
-                leading: const Icon(Icons.delete_forever, color: Colors.red),
+                leading: const Icon(Icons.delete_forever_outlined, color: AppColors.payText),
                 title: const Text(
                   "Permanently Delete",
-                  style: TextStyle(color: Colors.red),
+                  style: TextStyle(color: AppColors.payText, fontWeight: FontWeight.w500),
                 ),
                 onTap: () async {
                   Navigator.pop(context);
@@ -6251,28 +6990,40 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   }
 
   Widget _buildDateHeader(String formattedDate) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final borderCol = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final variantBg = isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant;
+
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
+      padding: const EdgeInsets.symmetric(vertical: 14),
       child: Row(
         children: [
-          const Expanded(
+          Expanded(
             child: Divider(
-              color: Colors.white24,
+              color: borderCol,
               thickness: 1,
               endIndent: 12,
             ),
           ),
-          Text(
-            formattedDate,
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              color: Colors.white70,
-              fontSize: 13,
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: variantBg,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              formattedDate,
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: subtextColor,
+                fontSize: 12,
+              ),
             ),
           ),
-          const Expanded(
+          Expanded(
             child: Divider(
-              color: Colors.white24,
+              color: borderCol,
               thickness: 1,
               indent: 12,
             ),
@@ -6283,29 +7034,54 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
   }
 
   Widget _buildTransactionsTable(List<TransactionModel> transactions) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
-      child: Table(
-        columnWidths: const {
-          0: FlexColumnWidth(),
-          1: FixedColumnWidth(65),
-          2: FixedColumnWidth(48),
-        },
-        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-        children: transactions.map((t) {
-          final isGiven = _transactionDisplayIsGiven(t);
-          final rowBgColor = isGiven
-              ? Colors.green.withValues(alpha: 0.15)
-              : Colors.red.withValues(alpha: 0.15);
-          final moneyColor = isGiven ? Colors.green : Colors.red;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final cardBg = isDark ? AppColors.surfaceDark : Colors.white;
+    final cardBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final variantBg = isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant;
 
-          Widget buildCell(
-            Widget child, {
-            Alignment alignment = Alignment.centerLeft,
-            EdgeInsetsGeometry padding = const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-          }) {
-            return GestureDetector(
-              behavior: HitTestBehavior.opaque,
+    return Column(
+      children: transactions.map((t) {
+        final isGiven = _transactionDisplayIsGiven(t);
+        final moneyColor = isGiven
+            ? (isDark ? const Color(0xFF34D399) : AppColors.collectText)
+            : (isDark ? const Color(0xFFF87171) : AppColors.payText);
+        final badgeBg = isDark
+            ? const Color(0xFF1E222A)
+            : (isGiven ? AppColors.collectBg : AppColors.payBg);
+        final badgeBorder = isDark
+            ? const Color(0xFF2D323E)
+            : (isGiven ? AppColors.collectBadge : AppColors.payBadge);
+        final iconColor = isDark
+            ? (isGiven ? const Color(0xFF34D399) : const Color(0xFFF87171))
+            : (isGiven ? AppColors.collectText : AppColors.payText);
+        final iconData = isGiven ? Icons.arrow_downward_rounded : Icons.arrow_upward_rounded;
+
+        final hasLocal = t.receiptPath != null &&
+            t.receiptPath!.isNotEmpty &&
+            File(t.receiptPath!).existsSync();
+        final hasRemote = t.receiptUrl != null && t.receiptUrl!.isNotEmpty;
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            color: cardBg,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: cardBorder),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(16),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
               onTap: () async {
                 final result = await Navigator.push(
                   context,
@@ -6320,237 +7096,258 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                 }
               },
               onLongPress: () => _showTransactionOptions(context, t),
-              child: Container(
-                alignment: alignment,
-                padding: padding,
-                child: child,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: badgeBg,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: badgeBorder, width: 0.8),
+                      ),
+                      child: Center(
+                        child: Icon(
+                          iconData,
+                          color: iconColor,
+                          size: 18,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            t.note.isNotEmpty ? t.note : (isGiven ? "Given" : "Taken"),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: textColor,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Row(
+                            children: [
+                              Text(
+                                _formatDateString(t.date),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: subtextColor,
+                                ),
+                              ),
+                              if (hasLocal || hasRemote) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                                  decoration: BoxDecoration(
+                                    color: variantBg,
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.receipt_outlined, size: 11, color: subtextColor),
+                                      const SizedBox(width: 2),
+                                      Text(
+                                        "Bill",
+                                        style: TextStyle(fontSize: 10, color: subtextColor, fontWeight: FontWeight.w500),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          "${isGiven ? '+' : '-'}₹${t.amount.toStringAsFixed(0)}",
+                          style: TextStyle(
+                            color: moneyColor,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          isGiven ? "Given" : "Taken",
+                          style: TextStyle(
+                            color: moneyColor.withValues(alpha: 0.8),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            );
-          }
-
-          return TableRow(
-            decoration: BoxDecoration(
-              color: rowBgColor,
             ),
-            children: [
-              buildCell(
-                Text(
-                  t.note,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13),
-                ),
-              ),
-              buildCell(
-                Text(
-                  "\u20B9${t.amount.toStringAsFixed(0)}",
-                  style: TextStyle(
-                    color: moneyColor,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
-                  ),
-                ),
-                alignment: Alignment.centerRight,
-              ),
-              buildCell(
-                (() {
-                  final hasLocal = t.receiptPath != null &&
-                      t.receiptPath!.isNotEmpty &&
-                      File(t.receiptPath!).existsSync();
-                  if (hasLocal) {
-                    return ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: Image.file(
-                        File(t.receiptPath!),
-                        width: 32,
-                        height: 32,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const Icon(
-                          Icons.broken_image,
-                          size: 18,
-                          color: Colors.grey,
-                        ),
-                      ),
-                    );
-                  } else if (t.receiptUrl != null && t.receiptUrl!.isNotEmpty) {
-                    return ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: CustomCachedImage(
-                        url: t.receiptUrl!,
-                        width: 32,
-                        height: 32,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const Icon(
-                          Icons.broken_image,
-                          size: 18,
-                          color: Colors.grey,
-                        ),
-                      ),
-                    );
-                  } else {
-                    return const Icon(
-                      Icons.receipt_long,
-                      size: 18,
-                      color: Colors.grey,
-                    );
-                  }
-                })(),
-                alignment: Alignment.center,
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-              ),
-            ],
-          );
-        }).toList(),
-      ),
+          ),
+        );
+      }).toList(),
     );
   }
 
   Widget _buildDeletedTransactionsSection() {
-    return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
-      title: const Text(
-        "Cleared Transactions",
-        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-      ),
-      children: [
-        if (deletedTransactions.isEmpty)
-          const Padding(
-            padding: EdgeInsets.only(bottom: 16),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                "No cleared transactions.",
-                style: TextStyle(color: Colors.grey),
-              ),
-            ),
-          )
-        else
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Table(
-              columnWidths: const {
-                0: FixedColumnWidth(80),
-                1: FlexColumnWidth(),
-                2: FixedColumnWidth(65),
-                3: FixedColumnWidth(80),
-              },
-              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-              children: [
-                TableRow(
-                  decoration: BoxDecoration(
-                    color: Colors.grey[850],
-                  ),
-                  children: [
-                    Container(
-                      alignment: Alignment.centerLeft,
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                      child: const Text(
-                        'Date',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
-                      ),
-                    ),
-                    Container(
-                      alignment: Alignment.centerLeft,
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                      child: const Text(
-                        'Note',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
-                      ),
-                    ),
-                    Container(
-                      alignment: Alignment.centerRight,
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                      child: const Text(
-                        '₹',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
-                      ),
-                    ),
-                    Container(
-                      alignment: Alignment.centerRight,
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                      child: const Text(
-                        'Cleared',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
-                      ),
-                    ),
-                  ],
-                ),
-                ...deletedTransactions.map((entry) {
-                  final moneyColor = entry.isGiven ? Colors.green : Colors.red;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final cardBg = isDark ? AppColors.surfaceDark : Colors.white;
+    final cardBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final variantBg = isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant;
 
-                  Widget buildCell(
-                    Widget child, {
-                    Alignment alignment = Alignment.centerLeft,
-                    EdgeInsetsGeometry padding = const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: cardBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cardBorder),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          title: Row(
+            children: [
+              Icon(Icons.history_rounded, size: 20, color: subtextColor),
+              const SizedBox(width: 8),
+              Text(
+                "Cleared Transactions",
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: textColor),
+              ),
+              if (deletedTransactions.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: variantBg,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    "${deletedTransactions.length}",
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: subtextColor),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          children: [
+            if (deletedTransactions.isEmpty)
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Center(
+                  child: Text(
+                    "No cleared transactions.",
+                    style: TextStyle(color: subtextColor, fontSize: 13),
+                  ),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: Column(
+                  children: deletedTransactions.map((entry) {
+                    final moneyColor = entry.isGiven ? AppColors.collectText : AppColors.payText;
                     return GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onLongPress: () {
                         _showDeletedTransactionOptions(context, entry);
                       },
                       child: Container(
-                        alignment: alignment,
-                        padding: padding,
-                        child: child,
+                        margin: const EdgeInsets.only(bottom: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: variantBg,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    entry.note.isNotEmpty ? entry.note : (entry.isGiven ? "Given" : "Taken"),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: textColor),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    "Date: ${_formatDateString(entry.date)} • Cleared: ${_formatDateString(entry.clearedDate)}",
+                                    style: TextStyle(fontSize: 11, color: subtextColor),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              "₹${entry.amount.toStringAsFixed(0)}",
+                              style: TextStyle(
+                                color: moneyColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     );
-                  }
-
-                  return TableRow(
-                    decoration: BoxDecoration(
-                      color: Colors.grey[900],
-                    ),
-                    children: [
-                      buildCell(
-                        Text(
-                          _formatDateString(entry.date),
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                      ),
-                      buildCell(
-                        Text(
-                          entry.note,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                      ),
-                      buildCell(
-                        Text(
-                          "\u20B9${entry.amount.toStringAsFixed(0)}",
-                          style: TextStyle(
-                            color: moneyColor,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                          ),
-                        ),
-                        alignment: Alignment.centerRight,
-                      ),
-                      buildCell(
-                        Text(
-                          _formatDateString(entry.clearedDate),
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                        alignment: Alignment.centerRight,
-                      ),
-                    ],
-                  );
-                }),
-              ],
-            ),
-          ),
-      ],
+                  }).toList(),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final cardBg = isDark ? AppColors.surfaceDark : Colors.white;
+    final cardBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final variantBg = isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant;
+
     return Scaffold(
+      backgroundColor: isDark ? AppColors.backgroundDark : AppColors.background,
       appBar: AppBar(
-        title: Text(widget.friendName),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios_new_rounded, color: textColor, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          widget.friendName,
+          style: TextStyle(
+            color: textColor,
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+          ),
+        ),
         centerTitle: true,
         actions: [
           PopupMenuButton<String>(
+            color: cardBg,
+            elevation: 4,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: cardBorder),
+            ),
             onSelected: (value) {
               if (value == 'rename_friend') {
                 _renameFriend();
@@ -6568,87 +7365,87 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
             itemBuilder: (context) => [
               PopupMenuItem<String>(
                 value: 'rename_friend',
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 child: Row(
                   children: [
-                    const Icon(Icons.edit_outlined, color: Colors.white70),
-                    const SizedBox(width: 16),
+                    Icon(Icons.edit_outlined, color: textColor, size: 20),
+                    const SizedBox(width: 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text(
+                          Text(
                             'Rename Friend',
-                            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                            style: TextStyle(color: textColor, fontSize: 14, fontWeight: FontWeight.w600),
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 2),
                           Text(
                             'Change display name',
-                            style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                            style: TextStyle(color: subtextColor, fontSize: 11),
                           ),
                         ],
                       ),
                     ),
-                    const Icon(Icons.chevron_right, color: Colors.grey),
+                    Icon(Icons.chevron_right, color: subtextColor, size: 18),
                   ],
                 ),
               ),
               const PopupMenuDivider(height: 1),
               PopupMenuItem<String>(
                 value: 'clear_account',
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 child: Row(
                   children: [
-                    const Icon(Icons.cleaning_services_outlined, color: Colors.white70),
-                    const SizedBox(width: 16),
+                    Icon(Icons.cleaning_services_outlined, color: textColor, size: 20),
+                    const SizedBox(width: 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text(
+                          Text(
                             'Clear Account',
-                            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                            style: TextStyle(color: textColor, fontSize: 14, fontWeight: FontWeight.w600),
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 2),
                           Text(
                             'Set balance to zero',
-                            style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                            style: TextStyle(color: subtextColor, fontSize: 11),
                           ),
                         ],
                       ),
                     ),
-                    const Icon(Icons.chevron_right, color: Colors.grey),
+                    Icon(Icons.chevron_right, color: subtextColor, size: 18),
                   ],
                 ),
               ),
               const PopupMenuDivider(height: 1),
               PopupMenuItem<String>(
                 value: 'settlement_history',
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 child: Row(
                   children: [
-                    const Icon(Icons.history_outlined, color: Colors.white70),
-                    const SizedBox(width: 16),
+                    Icon(Icons.history_rounded, color: textColor, size: 20),
+                    const SizedBox(width: 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text(
+                          Text(
                             'Settlement History',
-                            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                            style: TextStyle(color: textColor, fontSize: 14, fontWeight: FontWeight.w600),
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 2),
                           Text(
                             'View past settlements',
-                            style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                            style: TextStyle(color: subtextColor, fontSize: 11),
                           ),
                         ],
                       ),
                     ),
-                    const Icon(Icons.chevron_right, color: Colors.grey),
+                    Icon(Icons.chevron_right, color: subtextColor, size: 18),
                   ],
                 ),
               ),
@@ -6659,10 +7456,10 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : personTransactions.isEmpty && deletedTransactions.isEmpty
-          ? const Center(
+          ? Center(
               child: Text(
                 "No transactions found.",
-                style: TextStyle(fontSize: 16, color: Colors.grey),
+                style: TextStyle(fontSize: 16, color: subtextColor),
               ),
             )
           : FutureBuilder<Map<String, dynamic>?>(
@@ -6685,42 +7482,63 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                         padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                         child: Column(
                           children: [
-                            if (photoUrl != null && photoUrl.isNotEmpty) ...[
-                              Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  CircleAvatar(
-                                    radius: 40,
-                                    backgroundColor: Colors.grey[800],
-                                    child: ClipOval(
+                            // Profile Avatar and Name (Screen 2 style)
+                            CircleAvatar(
+                              radius: 36,
+                              backgroundColor: variantBg,
+                              child: (photoUrl != null && photoUrl.isNotEmpty)
+                                  ? ClipOval(
                                       child: CustomCachedImage(
                                         url: photoUrl,
-                                        width: 80,
-                                        height: 80,
+                                        width: 72,
+                                        height: 72,
                                         fit: BoxFit.cover,
                                       ),
+                                    )
+                                  : Text(
+                                      _displayName.isNotEmpty ? _displayName[0].toUpperCase() : '?',
+                                      style: TextStyle(
+                                        fontSize: 26,
+                                        fontWeight: FontWeight.bold,
+                                        color: textColor,
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    _displayName,
-                                    style: const TextStyle(
-                                      fontSize: 22,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 16),
-                                ],
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _displayName,
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: textColor,
                               ),
-                            ],
-                            // Summary Card for this Person
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              (mobileNumber != null && mobileNumber.isNotEmpty)
+                                  ? mobileNumber
+                                  : "Active Friend",
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: subtextColor,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            // Summary Card for this Person (Screen 2 style)
                             Container(
                               width: double.infinity,
-                              padding: const EdgeInsets.all(16),
+                              padding: const EdgeInsets.all(18),
                               decoration: BoxDecoration(
-                                color: Colors.grey[900],
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: Colors.grey[850] ?? const Color(0xFF212121)),
+                                color: cardBg,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: cardBorder),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                ],
                               ),
                               child: Column(
                                 children: [
@@ -6730,39 +7548,46 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                       Column(
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
-                                          const Text(
+                                          Text(
                                             "Given (+)",
                                             style: TextStyle(
-                                              color: Colors.grey,
-                                              fontSize: 14,
+                                              color: subtextColor,
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w500,
                                             ),
                                           ),
                                           const SizedBox(height: 4),
                                           Text(
                                             "\u20B9${totalGiven.toStringAsFixed(0)}",
                                             style: const TextStyle(
-                                              color: Colors.green,
+                                              color: AppColors.collectText,
                                               fontSize: 20,
                                               fontWeight: FontWeight.bold,
                                             ),
                                           ),
                                         ],
                                       ),
+                                      Container(
+                                        height: 34,
+                                        width: 1,
+                                        color: cardBorder,
+                                      ),
                                       Column(
                                         crossAxisAlignment: CrossAxisAlignment.end,
                                         children: [
-                                          const Text(
+                                          Text(
                                             "Taken (-)",
                                             style: TextStyle(
-                                              color: Colors.grey,
-                                              fontSize: 14,
+                                              color: subtextColor,
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w500,
                                             ),
                                           ),
                                           const SizedBox(height: 4),
                                           Text(
                                             "\u20B9${totalTaken.toStringAsFixed(0)}",
                                             style: const TextStyle(
-                                              color: Colors.red,
+                                              color: AppColors.payText,
                                               fontSize: 20,
                                               fontWeight: FontWeight.bold,
                                             ),
@@ -6771,24 +7596,25 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                       ),
                                     ],
                                   ),
-                                  const Divider(height: 24, color: Colors.grey),
+                                  Divider(height: 24, color: isDark ? AppColors.dividerDark : AppColors.borderLight),
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      const Text(
+                                      Text(
                                         "Net Balance",
                                         style: TextStyle(
-                                          fontSize: 16,
+                                          fontSize: 15,
                                           fontWeight: FontWeight.bold,
+                                          color: textColor,
                                         ),
                                       ),
                                       Text(
                                         "${netBalance >= 0 ? '' : '-'}\u20B9${netBalance.abs().toStringAsFixed(0)}",
                                         style: TextStyle(
                                           color: netBalance >= 0
-                                              ? Colors.green
-                                              : Colors.red,
-                                          fontSize: 22,
+                                              ? AppColors.collectText
+                                              : AppColors.payText,
+                                          fontSize: 20,
                                           fontWeight: FontWeight.bold,
                                         ),
                                       ),
@@ -6797,162 +7623,41 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                 ],
                               ),
                             ),
-                            if (netBalance != 0) ...[
-                              const SizedBox(height: 16),
-                              if (netBalance < 0) ...[
-                                (() {
-                                  final hasUpi = upiId != null && upiId.trim().isNotEmpty;
-                                  return Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      ElevatedButton.icon(
-                                        onPressed: () async {
-                                          const channel = MethodChannel('hisab_kitab/upi_launcher');
-                                          try {
-                                            final bool? success = await channel.invokeMethod<bool>('launchUpiPayment');
-                                            if (success != true) {
-                                              if (context.mounted) {
-                                                ScaffoldMessenger.of(context).showSnackBar(
-                                                  const SnackBar(
-                                                    content: Text('No UPI app available.'),
-                                                  ),
-                                                );
-                                              }
-                                            }
-                                          } catch (e) {
-                                            if (context.mounted) {
-                                              ScaffoldMessenger.of(context).showSnackBar(
-                                                SnackBar(
-                                                  content: Text('Could not open UPI app: $e'),
-                                                ),
-                                              );
-                                            }
-                                          }
-                                        },
-                                        icon: const Icon(Icons.payment),
-                                        label: const Text("Open UPI App"),
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: Colors.blueAccent,
-                                          foregroundColor: Colors.white,
-                                          minimumSize: const Size(double.infinity, 50),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(12),
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      hasUpi
-                                          ? Row(
-                                              mainAxisAlignment: MainAxisAlignment.center,
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                Text(
-                                                  "UPI ID: $upiId",
-                                                  style: const TextStyle(
-                                                    color: Colors.grey,
-                                                    fontSize: 14,
-                                                    fontWeight: FontWeight.w500,
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 4),
-                                                GestureDetector(
-                                                  onTap: () async {
-                                                    await Clipboard.setData(
-                                                      ClipboardData(text: upiId.trim()),
-                                                    );
-                                                    if (context.mounted) {
-                                                      ScaffoldMessenger.of(context).showSnackBar(
-                                                        const SnackBar(
-                                                          content: Text('UPI ID copied'),
-                                                          duration: Duration(seconds: 2),
-                                                        ),
-                                                      );
-                                                    }
-                                                  },
-                                                  child: Padding(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                                    child: Icon(
-                                                      Icons.copy_rounded,
-                                                      size: 14,
-                                                      color: Colors.grey[400],
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                            )
-                                          : Text(
-                                              _friendProfileFuture == null
-                                                  ? "UPI ID: Not available offline"
-                                                  : (snapshot.connectionState == ConnectionState.waiting
-                                                      ? "Loading UPI ID..."
-                                                      : "Friend has not added a UPI ID."),
-                                              style: const TextStyle(
-                                                color: Colors.grey,
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                            ),
-                                    ],
-                                  );
-                                })(),
-                              ] else if (netBalance > 0) ...[
-                                (() {
-                                  if (_friendProfileFuture == null) {
-                                    return ElevatedButton.icon(
-                                      onPressed: () {
-                                        if (context.mounted) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            const SnackBar(
-                                              content: Text("Friend has not added a mobile number."),
-                                            ),
-                                          );
-                                        }
-                                      },
-                                      icon: const Icon(Icons.notifications_active),
-                                      label: const Text("Send Reminder"),
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: Colors.orangeAccent,
-                                        foregroundColor: Colors.white,
-                                        minimumSize: const Size(double.infinity, 50),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(12),
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                  if (snapshot.connectionState == ConnectionState.waiting &&
-                                      (mobileNumber == null || mobileNumber.trim().isEmpty)) {
-                                    return const Padding(
-                                      padding: EdgeInsets.only(top: 8),
-                                      child: SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child: CircularProgressIndicator(strokeWidth: 2),
-                                      ),
-                                    );
-                                  }
-                                  return ElevatedButton.icon(
+                            const SizedBox(height: 14),
+                            // Action Buttons Row (Screen 2: Send Reminder, Settle Up, Share)
+                            Row(
+                              children: [
+                                // Send Reminder (Black pill button)
+                                Expanded(
+                                  flex: 5,
+                                  child: ElevatedButton.icon(
                                     onPressed: () async {
+                                      if (netBalance <= 0) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text("No dues pending to collect from this friend."),
+                                            duration: Duration(seconds: 2),
+                                          ),
+                                        );
+                                        return;
+                                      }
+
                                       if (mobileNumber == null || mobileNumber.trim().isEmpty) {
-                                        if (context.mounted) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            const SnackBar(
-                                              content: Text("Friend has not added a mobile number."),
-                                            ),
-                                          );
-                                        }
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text("Friend has not added a mobile number."),
+                                          ),
+                                        );
                                         return;
                                       }
 
                                       final normalizedMobile = _normalizePhoneNumber(mobileNumber.trim());
                                       if (normalizedMobile.isEmpty) {
-                                        if (context.mounted) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            const SnackBar(
-                                              content: Text("Friend has not added a mobile number."),
-                                            ),
-                                          );
-                                        }
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text("Friend has not added a mobile number."),
+                                          ),
+                                        );
                                         return;
                                       }
 
@@ -6971,14 +7676,12 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                           whatsappUri,
                                           mode: LaunchMode.externalApplication,
                                         );
-                                        if (!launched) {
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              const SnackBar(
-                                                content: Text('Could not launch WhatsApp.'),
-                                              ),
-                                            );
-                                          }
+                                        if (!launched && context.mounted) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(
+                                              content: Text('Could not launch WhatsApp.'),
+                                            ),
+                                          );
                                         }
                                       } catch (e) {
                                         if (context.mounted) {
@@ -6990,45 +7693,202 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                         }
                                       }
                                     },
-                                    icon: const Icon(Icons.notifications_active),
-                                    label: const Text("Send Reminder"),
+                                    icon: const Icon(Icons.notifications_active_outlined, size: 16),
+                                    label: const Text(
+                                      "Reminder",
+                                      style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                    ),
                                     style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.orangeAccent,
-                                      foregroundColor: Colors.white,
-                                      minimumSize: const Size(double.infinity, 50),
+                                      backgroundColor: isDark ? Colors.white : AppColors.darkCard,
+                                      foregroundColor: isDark ? AppColors.darkCard : Colors.white,
+                                      elevation: 0,
+                                      padding: const EdgeInsets.symmetric(vertical: 12),
                                       shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
+                                        borderRadius: BorderRadius.circular(24),
                                       ),
                                     ),
-                                  );
-                                })(),
-                              ],
-                            ],
-                            const SizedBox(height: 20),
-                            Row(
-                              children: const [
-                                Text(
-                                  "Transaction History",
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                // Settle Up (Light pill button)
+                                Expanded(
+                                  flex: 5,
+                                  child: OutlinedButton.icon(
+                                    onPressed: _clearAccount,
+                                    icon: const Icon(Icons.check_circle_outline_rounded, size: 16),
+                                    label: const Text(
+                                      "Settle Up",
+                                      style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      backgroundColor: cardBg,
+                                      foregroundColor: textColor,
+                                      side: BorderSide(color: cardBorder),
+                                      padding: const EdgeInsets.symmetric(vertical: 12),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(24),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                // Share (Light pill button)
+                                InkWell(
+                                  onTap: () async {
+                                    final summaryText = 'Hisab summary with $_displayName:\n'
+                                        'Given: ₹${totalGiven.toStringAsFixed(0)}\n'
+                                        'Taken: ₹${totalTaken.toStringAsFixed(0)}\n'
+                                        'Net Balance: ${netBalance >= 0 ? '' : '-'}₹${netBalance.abs().toStringAsFixed(0)}';
+                                    await Clipboard.setData(ClipboardData(text: summaryText));
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Hisab summary copied to clipboard!'),
+                                          duration: Duration(seconds: 2),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  borderRadius: BorderRadius.circular(24),
+                                  child: Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color: cardBg,
+                                      shape: BoxShape.circle,
+                                      border: Border.all(color: cardBorder),
+                                    ),
+                                    child: Icon(
+                                      Icons.share_outlined,
+                                      size: 16,
+                                      color: textColor,
+                                    ),
                                   ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 10),
+                            if (netBalance < 0) ...[
+                              const SizedBox(height: 12),
+                              (() {
+                                final hasUpi = upiId != null && upiId.trim().isNotEmpty;
+                                final upiBg = isDark ? const Color(0xFF181B22) : variantBg;
+                                final upiBorder = isDark ? const Color(0xFF262B35) : AppColors.borderLight;
+                                return Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                                  decoration: BoxDecoration(
+                                    color: upiBg,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: upiBorder, width: 0.8),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              hasUpi ? "UPI: $upiId" : "Friend has not set UPI ID",
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                                color: textColor,
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                            if (hasUpi)
+                                              GestureDetector(
+                                                onTap: () async {
+                                                  await Clipboard.setData(ClipboardData(text: upiId.trim()));
+                                                  if (context.mounted) {
+                                                    ScaffoldMessenger.of(context).showSnackBar(
+                                                      const SnackBar(
+                                                        content: Text('UPI ID copied to clipboard'),
+                                                        duration: Duration(seconds: 2),
+                                                      ),
+                                                    );
+                                                  }
+                                                },
+                                                child: Padding(
+                                                  padding: const EdgeInsets.only(top: 2),
+                                                  child: Text(
+                                                    "Tap to copy UPI ID",
+                                                    style: TextStyle(fontSize: 11, color: subtextColor),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      ElevatedButton.icon(
+                                        onPressed: () async {
+                                          const channel = MethodChannel('hisab_kitab/upi_launcher');
+                                          try {
+                                            final bool? success = await channel.invokeMethod<bool>('launchUpiPayment');
+                                            if (success != true && context.mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                const SnackBar(
+                                                  content: Text('No UPI app available.'),
+                                                ),
+                                              );
+                                            }
+                                          } catch (e) {
+                                            if (context.mounted) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(
+                                                  content: Text('Could not open UPI app: $e'),
+                                                ),
+                                              );
+                                            }
+                                          }
+                                        },
+                                        icon: const Icon(Icons.payment, size: 16),
+                                        label: const Text(
+                                          "Pay UPI",
+                                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                                        ),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: isDark ? const Color(0xFF2D323E) : AppColors.darkCard,
+                                          foregroundColor: Colors.white,
+                                          elevation: 0,
+                                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(12),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              })(),
+                            ],
+                            const SizedBox(height: 18),
+                            Row(
+                              children: [
+                                Text(
+                                  "Transaction History",
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: textColor,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
                           ],
                         ),
                       ),
                     ),
                     if (personTransactions.isEmpty)
-                      const SliverToBoxAdapter(
+                      SliverToBoxAdapter(
                         child: Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                           child: Center(
                             child: Text(
                               "No active transactions found.",
-                              style: TextStyle(fontSize: 16, color: Colors.grey),
+                              style: TextStyle(fontSize: 15, color: subtextColor),
                             ),
                           ),
                         ),
@@ -7046,7 +7906,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                                   _buildDateHeader(group.dateLabel),
                                   const SizedBox(height: 4),
                                   _buildTransactionsTable(group.transactions),
-                                  const SizedBox(height: 12),
+                                  const SizedBox(height: 8),
                                 ],
                               );
                             },
@@ -7056,7 +7916,7 @@ class _PersonDetailPageState extends State<PersonDetailPage> {
                       ),
                     SliverToBoxAdapter(
                       child: Padding(
-                        padding: const EdgeInsets.all(16),
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                         child: _buildDeletedTransactionsSection(),
                       ),
                     ),
@@ -7092,17 +7952,34 @@ class SettlementHistoryPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+    final cardBg = isDark ? AppColors.surfaceDark : Colors.white;
+    final cardBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final variantBg = isDark ? AppColors.surfaceVariantDark : AppColors.surfaceVariant;
+
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) {
       return Scaffold(
+        backgroundColor: isDark ? AppColors.backgroundDark : AppColors.background,
         appBar: AppBar(
-          title: const Text('Settlement History'),
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          leading: IconButton(
+            icon: Icon(Icons.arrow_back_ios_new_rounded, color: textColor, size: 20),
+            onPressed: () => Navigator.pop(context),
+          ),
+          title: Text(
+            'Settlement History',
+            style: TextStyle(color: textColor, fontWeight: FontWeight.bold, fontSize: 18),
+          ),
           centerTitle: true,
         ),
-        body: const Center(
+        body: Center(
           child: Text(
             'Please log in to view settlement history.',
-            style: TextStyle(color: Colors.grey, fontSize: 16),
+            style: TextStyle(color: subtextColor, fontSize: 15),
           ),
         ),
       );
@@ -7115,8 +7992,18 @@ class SettlementHistoryPage extends StatelessWidget {
         .orderBy('settledAt', descending: true);
 
     return Scaffold(
+      backgroundColor: isDark ? AppColors.backgroundDark : AppColors.background,
       appBar: AppBar(
-        title: Text(friendName != null ? '$friendName Settlements' : 'Settlement History'),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios_new_rounded, color: textColor, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          friendName != null ? '$friendName Settlements' : 'Settlement History',
+          style: TextStyle(color: textColor, fontWeight: FontWeight.bold, fontSize: 18),
+        ),
         centerTitle: true,
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -7126,7 +8013,7 @@ class SettlementHistoryPage extends StatelessWidget {
             return Center(
               child: Text(
                 'Error loading settlements: ${snapshot.error}',
-                style: const TextStyle(color: Colors.red),
+                style: const TextStyle(color: AppColors.payText),
               ),
             );
           }
@@ -7149,15 +8036,15 @@ class SettlementHistoryPage extends StatelessWidget {
           }
 
           if (settlements.isEmpty) {
-            return const Center(
+            return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.history, size: 64, color: Colors.grey),
-                  SizedBox(height: 16),
+                  Icon(Icons.history_rounded, size: 56, color: subtextColor),
+                  const SizedBox(height: 12),
                   Text(
                     "No settlements recorded yet.",
-                    style: TextStyle(color: Colors.grey, fontSize: 16),
+                    style: TextStyle(color: subtextColor, fontSize: 15),
                   ),
                 ],
               ),
@@ -7186,78 +8073,84 @@ class SettlementHistoryPage extends StatelessWidget {
               final dateStr = _formatSettlementDate(settledDateTime);
               final timeStr = _formatSettlementTime(settledDateTime);
 
-              return Card(
-                color: Colors.grey[900],
-                margin: const EdgeInsets.only(bottom: 16),
-                shape: RoundedRectangleBorder(
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: cardBg,
                   borderRadius: BorderRadius.circular(16),
-                  side: BorderSide(color: Colors.grey[850] ?? const Color(0xFF212121)),
+                  border: Border.all(color: cardBorder),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
                 ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Expanded(
-                            child: Text(
-                              friend,
-                              style: const TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                          Text(
-                            "Settled \u20B9${amount.toStringAsFixed(0)}",
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.green,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
-                          const SizedBox(width: 6),
-                          Text(
-                            dateStr,
-                            style: const TextStyle(color: Colors.grey, fontSize: 14),
-                          ),
-                          const SizedBox(width: 16),
-                          const Icon(Icons.access_time, size: 14, color: Colors.grey),
-                          const SizedBox(width: 6),
-                          Text(
-                            timeStr,
-                            style: const TextStyle(color: Colors.grey, fontSize: 14),
-                          ),
-                        ],
-                      ),
-                      if (settledBy.isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.blueGrey.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
                           child: Text(
-                            "Settled by $settledBy",
+                            friend,
                             style: TextStyle(
-                              color: Colors.blue[300],
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: textColor,
                             ),
                           ),
                         ),
+                        Text(
+                          "Settled \u20B9${amount.toStringAsFixed(0)}",
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.collectText,
+                          ),
+                        ),
                       ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Icon(Icons.calendar_today_outlined, size: 13, color: subtextColor),
+                        const SizedBox(width: 5),
+                        Text(
+                          dateStr,
+                          style: TextStyle(color: subtextColor, fontSize: 13),
+                        ),
+                        const SizedBox(width: 16),
+                        Icon(Icons.access_time_rounded, size: 13, color: subtextColor),
+                        const SizedBox(width: 5),
+                        Text(
+                          timeStr,
+                          style: TextStyle(color: subtextColor, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                    if (settledBy.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: variantBg,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          "Settled by $settledBy",
+                          style: TextStyle(
+                            color: subtextColor,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
                     ],
-                  ),
+                  ],
                 ),
               );
             },
@@ -7291,7 +8184,33 @@ class _GlassActionButtonState extends State<GlassActionButton> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final buttonColor = widget.color;
+    final isCollect = buttonColor == Colors.green || buttonColor == AppColors.collectText;
+    final isPay = buttonColor == Colors.red || buttonColor == AppColors.payText;
+
+    final Color bgColor;
+    final Color borderColor;
+    final Color iconColor;
+
+    if (isDark) {
+      bgColor = const Color(0xFF1E222A);
+      borderColor = const Color(0xFF2D323E);
+      iconColor = isCollect
+          ? const Color(0xFF34D399)
+          : (isPay ? const Color(0xFFF87171) : buttonColor);
+    } else {
+      bgColor = isCollect
+          ? AppColors.collectBg
+          : (isPay ? AppColors.payBg : AppColors.surfaceVariant);
+      borderColor = isCollect
+          ? AppColors.collectBadge
+          : (isPay ? AppColors.payBadge : AppColors.borderLight);
+      iconColor = isCollect
+          ? AppColors.collectText
+          : (isPay ? AppColors.payText : buttonColor);
+    }
+
     return Tooltip(
       message: widget.tooltip,
       child: GestureDetector(
@@ -7304,28 +8223,21 @@ class _GlassActionButtonState extends State<GlassActionButton> {
           duration: const Duration(milliseconds: 100),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 100),
-            width: 36,
-            height: 36,
+            width: 34,
+            height: 34,
             decoration: BoxDecoration(
-              color: const Color(0xFF1E1E1E), // Subtle dark background matching dark theme cards
-              borderRadius: BorderRadius.circular(10), // Rounded-square border radius (10-12px)
+              color: bgColor,
+              borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                color: buttonColor.withValues(alpha: _isPressed ? 0.95 : 0.6),
-                width: 1.0, // Thin colored border
+                color: borderColor,
+                width: 1.0,
               ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.35),
-                  blurRadius: 3,
-                  offset: const Offset(0, 1.5), // Subtle shadow/elevation for depth
-                ),
-              ],
             ),
             child: Center(
               child: Icon(
                 widget.icon,
-                color: buttonColor,
-                size: 20, // Bold centered icon
+                color: iconColor,
+                size: 18,
               ),
             ),
           ),
@@ -7355,20 +8267,26 @@ class OlivePremiumButton extends StatefulWidget {
 
 class _OlivePremiumButtonState extends State<OlivePremiumButton> {
   bool _isPressed = false;
-  static const Color oliveColor = Color(0xFF9EA98F);
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final accentColor = isDark ? const Color(0xFFC4D5AF) : const Color(0xFF536B3D);
+    final bgColor = isDark ? AppColors.surfaceVariantDark : const Color(0xFFF6F8F3);
+    final borderColor = isDark ? AppColors.borderDark : const Color(0xFFDCE4D3);
+    final titleColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
+    final subtextColor = isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
+
     return AnimatedScale(
-      scale: _isPressed ? 0.96 : 1.0,
+      scale: _isPressed ? 0.97 : 1.0,
       duration: const Duration(milliseconds: 100),
       child: Container(
         decoration: BoxDecoration(
-          color: oliveColor.withValues(alpha: 0.1),
+          color: bgColor,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: oliveColor.withValues(alpha: 0.4),
-            width: 1.5,
+            color: borderColor,
+            width: 1.2,
           ),
         ),
         child: Material(
@@ -7383,8 +8301,8 @@ class _OlivePremiumButtonState extends State<OlivePremiumButton> {
               }
             },
             borderRadius: BorderRadius.circular(16),
-            splashColor: oliveColor.withValues(alpha: 0.25),
-            highlightColor: oliveColor.withValues(alpha: 0.15),
+            splashColor: accentColor.withValues(alpha: 0.15),
+            highlightColor: accentColor.withValues(alpha: 0.08),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
               child: Row(
@@ -7392,13 +8310,13 @@ class _OlivePremiumButtonState extends State<OlivePremiumButton> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: oliveColor.withValues(alpha: 0.2),
+                      color: isDark ? const Color(0xFF2A3127) : const Color(0xFFE8EFE0),
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
                       widget.icon,
-                      color: oliveColor,
-                      size: 26,
+                      color: accentColor,
+                      size: 24,
                     ),
                   ),
                   const SizedBox(width: 16),
@@ -7408,18 +8326,18 @@ class _OlivePremiumButtonState extends State<OlivePremiumButton> {
                       children: [
                         Text(
                           widget.title,
-                          style: const TextStyle(
-                            fontSize: 18,
+                          style: TextStyle(
+                            fontSize: 16,
                             fontWeight: FontWeight.bold,
-                            color: oliveColor,
+                            color: titleColor,
                           ),
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 3),
                         Text(
                           widget.description,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 12,
-                            color: Colors.white70,
+                            color: subtextColor,
                           ),
                         ),
                       ],
