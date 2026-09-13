@@ -30,6 +30,7 @@ Most *hisab-kitab* apps focus only on money exchanged between people.
 * 📊 Overall financial summary
 * 📜 Complete transaction history
 * 📸 UPI payment screenshot attachments
+* 📱 Reminder via Whatsapp
 * 📄 PDF transaction reports
 * 🔐 App security with device authentication
 * ☁️ Cloud storage for payment proofs
@@ -75,7 +76,6 @@ flutter run
 ## Future Scope
 
 * Financial analytics and spending insights
-* Payment reminders
 * Recurring transactions
 * Advanced charts and reports
 * UPI integrations
